@@ -1,10 +1,9 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSContactThread.h"
 #import "ContactsManagerProtocol.h"
-#import "ContactsUpdater.h"
 #import "NotificationsProtocol.h"
 #import "OWSIdentityManager.h"
 #import "SSKEnvironment.h"
@@ -20,9 +19,6 @@ NSUInteger const TSContactThreadSchemaVersion = 1;
 @property (nonatomic, nullable, readonly) NSString *contactPhoneNumber;
 @property (nonatomic, nullable, readonly) NSString *contactUUID;
 @property (nonatomic, readonly) NSUInteger contactThreadSchemaVersion;
-
-// From TSThread
-@property (nonatomic) NSString *conversationColorName;
 
 @end
 
@@ -49,32 +45,37 @@ NSUInteger const TSContactThreadSchemaVersion = 1;
 
 // clang-format off
 
-- (instancetype)initWithUniqueId:(NSString *)uniqueId
-                    archivalDate:(nullable NSDate *)archivalDate
-       archivedAsOfMessageSortId:(nullable NSNumber *)archivedAsOfMessageSortId
+- (instancetype)initWithGrdbId:(int64_t)grdbId
+                      uniqueId:(NSString *)uniqueId
            conversationColorName:(ConversationColorName)conversationColorName
                     creationDate:(nullable NSDate *)creationDate
-isArchivedByLegacyTimestampForSorting:(BOOL)isArchivedByLegacyTimestampForSorting
-                 lastMessageDate:(nullable NSDate *)lastMessageDate
+                      isArchived:(BOOL)isArchived
+                  isMarkedUnread:(BOOL)isMarkedUnread
+            lastInteractionRowId:(int64_t)lastInteractionRowId
+       lastVisibleSortIdObsolete:(uint64_t)lastVisibleSortIdObsolete
+lastVisibleSortIdOnScreenPercentageObsolete:(double)lastVisibleSortIdOnScreenPercentageObsolete
+         mentionNotificationMode:(TSThreadMentionNotificationMode)mentionNotificationMode
                     messageDraft:(nullable NSString *)messageDraft
+          messageDraftBodyRanges:(nullable MessageBodyRanges *)messageDraftBodyRanges
                   mutedUntilDate:(nullable NSDate *)mutedUntilDate
-                           rowId:(int64_t)rowId
            shouldThreadBeVisible:(BOOL)shouldThreadBeVisible
               contactPhoneNumber:(nullable NSString *)contactPhoneNumber
-      contactThreadSchemaVersion:(NSUInteger)contactThreadSchemaVersion
                      contactUUID:(nullable NSString *)contactUUID
               hasDismissedOffers:(BOOL)hasDismissedOffers
 {
-    self = [super initWithUniqueId:uniqueId
-                      archivalDate:archivalDate
-         archivedAsOfMessageSortId:archivedAsOfMessageSortId
+    self = [super initWithGrdbId:grdbId
+                        uniqueId:uniqueId
              conversationColorName:conversationColorName
                       creationDate:creationDate
-isArchivedByLegacyTimestampForSorting:isArchivedByLegacyTimestampForSorting
-                   lastMessageDate:lastMessageDate
+                        isArchived:isArchived
+                    isMarkedUnread:isMarkedUnread
+              lastInteractionRowId:lastInteractionRowId
+         lastVisibleSortIdObsolete:lastVisibleSortIdObsolete
+lastVisibleSortIdOnScreenPercentageObsolete:lastVisibleSortIdOnScreenPercentageObsolete
+           mentionNotificationMode:mentionNotificationMode
                       messageDraft:messageDraft
+            messageDraftBodyRanges:messageDraftBodyRanges
                     mutedUntilDate:mutedUntilDate
-                             rowId:rowId
              shouldThreadBeVisible:shouldThreadBeVisible];
 
     if (!self) {
@@ -82,7 +83,6 @@ isArchivedByLegacyTimestampForSorting:isArchivedByLegacyTimestampForSorting
     }
 
     _contactPhoneNumber = contactPhoneNumber;
-    _contactThreadSchemaVersion = contactThreadSchemaVersion;
     _contactUUID = contactUUID;
     _hasDismissedOffers = hasDismissedOffers;
 
@@ -145,9 +145,16 @@ isArchivedByLegacyTimestampForSorting:isArchivedByLegacyTimestampForSorting
     OWSAssertDebug(contactAddress.isValid);
 
     __block TSContactThread *thread;
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-        thread = [self getOrCreateThreadWithContactAddress:contactAddress transaction:transaction];
+    [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
+        thread = [self getThreadWithContactAddress:contactAddress transaction:transaction];
     }];
+
+    if (thread == nil) {
+        // Only open a write transaction if necessary
+        DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+            thread = [self getOrCreateThreadWithContactAddress:contactAddress transaction:transaction];
+        });
+    }
 
     return thread;
 }
@@ -166,10 +173,6 @@ isArchivedByLegacyTimestampForSorting:isArchivedByLegacyTimestampForSorting
 - (NSArray<SignalServiceAddress *> *)recipientAddresses
 {
     return @[ self.contactAddress ];
-}
-
-- (BOOL)isGroupThread {
-    return NO;
 }
 
 - (BOOL)isNoteToSelf
@@ -193,7 +196,7 @@ isArchivedByLegacyTimestampForSorting:isArchivedByLegacyTimestampForSorting
 
 - (BOOL)hasSafetyNumbers
 {
-    return !![[OWSIdentityManager sharedManager] identityKeyForAddress:self.contactAddress];
+    return !![[OWSIdentityManager shared] identityKeyForAddress:self.contactAddress];
 }
 
 + (nullable SignalServiceAddress *)contactAddressFromThreadId:(NSString *)threadId
@@ -211,8 +214,8 @@ isArchivedByLegacyTimestampForSorting:isArchivedByLegacyTimestampForSorting
     return [threadId substringWithRange:NSMakeRange(1, threadId.length - 1)];
 }
 
-+ (NSString *)conversationColorNameForContactAddress:(SignalServiceAddress *)address
-                                         transaction:(SDSAnyReadTransaction *)transaction
++ (ConversationColorName)conversationColorNameForContactAddress:(SignalServiceAddress *)address
+                                                    transaction:(SDSAnyReadTransaction *)transaction
 {
     OWSAssertDebug(address);
 

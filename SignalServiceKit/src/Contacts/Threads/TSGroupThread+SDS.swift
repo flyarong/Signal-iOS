@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -55,29 +55,29 @@ class TSGroupThreadSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .groupThread
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
-        let archivalDate: Double? = archiveOptionalDate(model.archivalDate)
-        let archivedAsOfMessageSortId: UInt64? = archiveOptionalNSNumber(model.archivedAsOfMessageSortId, conversion: { $0.uint64Value })
+        // Properties
         let conversationColorName: String = model.conversationColorName.rawValue
         let creationDate: Double? = archiveOptionalDate(model.creationDate)
-        let isArchivedByLegacyTimestampForSorting: Bool = model.isArchivedByLegacyTimestampForSorting
-        let lastMessageDate: Double? = archiveOptionalDate(model.lastMessageDate)
+        let isArchived: Bool = model.isArchived
+        let lastInteractionRowId: Int64 = model.lastInteractionRowId
         let messageDraft: String? = model.messageDraft
         let mutedUntilDate: Double? = archiveOptionalDate(model.mutedUntilDate)
         let shouldThreadBeVisible: Bool = model.shouldThreadBeVisible
-
-        // Subclass properties
         let contactPhoneNumber: String? = nil
-        let contactThreadSchemaVersion: UInt? = nil
         let contactUUID: String? = nil
         let groupModel: Data? = optionalArchive(model.groupModel)
         let hasDismissedOffers: Bool? = nil
+        let isMarkedUnread: Bool = model.isMarkedUnread
+        let lastVisibleSortIdOnScreenPercentage: Double = model.lastVisibleSortIdOnScreenPercentageObsolete
+        let lastVisibleSortId: UInt64 = model.lastVisibleSortIdObsolete
+        let messageDraftBodyRanges: Data? = optionalArchive(model.messageDraftBodyRanges)
+        let mentionNotificationMode: UInt = model.mentionNotificationMode.rawValue
 
-        return ThreadRecord(id: id, recordType: recordType, uniqueId: uniqueId, archivalDate: archivalDate, archivedAsOfMessageSortId: archivedAsOfMessageSortId, conversationColorName: conversationColorName, creationDate: creationDate, isArchivedByLegacyTimestampForSorting: isArchivedByLegacyTimestampForSorting, lastMessageDate: lastMessageDate, messageDraft: messageDraft, mutedUntilDate: mutedUntilDate, shouldThreadBeVisible: shouldThreadBeVisible, contactPhoneNumber: contactPhoneNumber, contactThreadSchemaVersion: contactThreadSchemaVersion, contactUUID: contactUUID, groupModel: groupModel, hasDismissedOffers: hasDismissedOffers)
+        return ThreadRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, conversationColorName: conversationColorName, creationDate: creationDate, isArchived: isArchived, lastInteractionRowId: lastInteractionRowId, messageDraft: messageDraft, mutedUntilDate: mutedUntilDate, shouldThreadBeVisible: shouldThreadBeVisible, contactPhoneNumber: contactPhoneNumber, contactUUID: contactUUID, groupModel: groupModel, hasDismissedOffers: hasDismissedOffers, isMarkedUnread: isMarkedUnread, lastVisibleSortIdOnScreenPercentage: lastVisibleSortIdOnScreenPercentage, lastVisibleSortId: lastVisibleSortId, messageDraftBodyRanges: messageDraftBodyRanges, mentionNotificationMode: mentionNotificationMode)
     }
 }

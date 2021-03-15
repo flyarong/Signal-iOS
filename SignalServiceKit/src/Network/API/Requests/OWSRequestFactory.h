@@ -1,22 +1,25 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
+
+#import <SignalServiceKit/RemoteAttestation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class ECKeyPair;
 @class OWSDevice;
 @class PreKeyRecord;
+@class ProfileValue;
 @class SMKUDAccessKey;
 @class SignalServiceAddress;
 @class SignedPreKeyRecord;
 @class TSRequest;
 
-typedef NS_ENUM(NSUInteger, RemoteAttestationService);
 typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVoice = 1, TSVerificationTransportSMS };
 
 @interface OWSRequestFactory : NSObject
 
++ (instancetype)new NS_UNAVAILABLE;
 - (instancetype)init NS_UNAVAILABLE;
 
 + (TSRequest *)enable2FARequestWithPin:(NSString *)pin;
@@ -41,21 +44,27 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)getMessagesRequest;
 
-+ (TSRequest *)getProfileRequestWithAddress:(SignalServiceAddress *)address
-                                udAccessKey:(nullable SMKUDAccessKey *)udAccessKey
-    NS_SWIFT_NAME(getProfileRequest(address:udAccessKey:));
++ (TSRequest *)getUnversionedProfileRequestWithAddress:(SignalServiceAddress *)address
+                                           udAccessKey:(nullable SMKUDAccessKey *)udAccessKey
+    NS_SWIFT_NAME(getUnversionedProfileRequest(address:udAccessKey:));
+
++ (TSRequest *)getVersionedProfileRequestWithAddress:(SignalServiceAddress *)address
+                                   profileKeyVersion:(nullable NSString *)profileKeyVersion
+                                   credentialRequest:(nullable NSData *)credentialRequest
+                                         udAccessKey:(nullable SMKUDAccessKey *)udAccessKey
+    NS_SWIFT_NAME(getVersionedProfileRequest(address:profileKeyVersion:credentialRequest:udAccessKey:));
 
 + (TSRequest *)turnServerInfoRequest;
 
-+ (TSRequest *)allocAttachmentRequest;
++ (TSRequest *)allocAttachmentRequestV2;
+
++ (TSRequest *)allocAttachmentRequestV3;
 
 + (TSRequest *)contactsIntersectionRequestWithHashesArray:(NSArray<NSString *> *)hashes;
 
 + (TSRequest *)profileAvatarUploadFormRequest;
 
 + (TSRequest *)registerForPushRequestWithPushIdentifier:(NSString *)identifier voipIdentifier:(NSString *)voipId;
-
-+ (TSRequest *)updateAttributesRequest;
 
 + (TSRequest *)accountWhoAmIRequest;
 
@@ -73,12 +82,29 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 + (TSRequest *)submitMessageRequestWithAddress:(SignalServiceAddress *)recipientAddress
                                       messages:(NSArray *)messages
                                      timeStamp:(uint64_t)timeStamp
-                                   udAccessKey:(nullable SMKUDAccessKey *)udAccessKey;
+                                   udAccessKey:(nullable SMKUDAccessKey *)udAccessKey
+                                      isOnline:(BOOL)isOnline;
 
-+ (TSRequest *)verifyCodeRequestWithVerificationCode:(NSString *)verificationCode
-                                           forNumber:(NSString *)phoneNumber
-                                                 pin:(nullable NSString *)pin
-                                             authKey:(NSString *)authKey;
++ (TSRequest *)verifyPrimaryDeviceRequestWithVerificationCode:(NSString *)verificationCode
+                                                  phoneNumber:(NSString *)phoneNumber
+                                                      authKey:(NSString *)authKey
+                                                          pin:(nullable NSString *)pin
+                                    checkForAvailableTransfer:(BOOL)checkForAvailableTransfer
+    NS_SWIFT_NAME(verifyPrimaryDeviceRequest(verificationCode:phoneNumber:authKey:pin:checkForAvailableTransfer:));
+
++ (TSRequest *)verifySecondaryDeviceRequestWithVerificationCode:(NSString *)verificationCode
+                                                    phoneNumber:(NSString *)phoneNumber
+                                                        authKey:(NSString *)authKey
+                                            encryptedDeviceName:(NSData *)encryptedDeviceName
+    NS_SWIFT_NAME(verifySecondaryDeviceRequest(verificationCode:phoneNumber:authKey:encryptedDeviceName:));
+
+#pragma mark - Attributes and Capabilities
+
++ (TSRequest *)updatePrimaryDeviceAttributesRequest;
+
++ (TSRequest *)updateSecondaryDeviceCapabilitiesRequest;
+
++ (NSDictionary<NSString *, NSNumber *> *)deviceCapabilitiesForLocalDevice;
 
 #pragma mark - Prekeys
 
@@ -102,31 +128,16 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 #pragma mark - Remote Attestation
 
-+ (TSRequest *)remoteAttestationRequestForService:(RemoteAttestationService)service
-                                      withKeyPair:(ECKeyPair *)keyPair
-                                      enclaveName:(NSString *)enclaveName
-                                     authUsername:(NSString *)authUsername
-                                     authPassword:(NSString *)authPassword;
-
 + (TSRequest *)remoteAttestationAuthRequestForService:(RemoteAttestationService)service;
 
 #pragma mark - CDS
 
-+ (TSRequest *)cdsEnclaveRequestWithRequestId:(NSData *)requestId
-                                 addressCount:(NSUInteger)addressCount
-                         encryptedAddressData:(NSData *)encryptedAddressData
-                                      cryptIv:(NSData *)cryptIv
-                                     cryptMac:(NSData *)cryptMac
-                                  enclaveName:(NSString *)enclaveName
-                                 authUsername:(NSString *)authUsername
-                                 authPassword:(NSString *)authPassword
-                                      cookies:(NSArray<NSHTTPCookie *> *)cookies;
 + (TSRequest *)cdsFeedbackRequestWithStatus:(NSString *)status
                                      reason:(nullable NSString *)reason NS_SWIFT_NAME(cdsFeedbackRequest(status:reason:));
 
 #pragma mark - KBS
 
-+ (TSRequest *)kbsEnclaveNonceRequestWithEnclaveName:(NSString *)enclaveName
++ (TSRequest *)kbsEnclaveTokenRequestWithEnclaveName:(NSString *)enclaveName
                                         authUsername:(NSString *)authUsername
                                         authPassword:(NSString *)authPassword
                                              cookies:(NSArray<NSHTTPCookie *> *)cookies;
@@ -138,17 +149,40 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
                                   enclaveName:(NSString *)enclaveName
                                  authUsername:(NSString *)authUsername
                                  authPassword:(NSString *)authPassword
-                                      cookies:(NSArray<NSHTTPCookie *> *)cookies;
+                                      cookies:(NSArray<NSHTTPCookie *> *)cookies
+                                  requestType:(NSString *)requestType;
 
 #pragma mark - UD
 
-+ (TSRequest *)udSenderCertificateRequest;
++ (TSRequest *)udSenderCertificateRequestWithUuidOnly:(BOOL)uuidOnly
+    NS_SWIFT_NAME(udSenderCertificateRequest(uuidOnly:));
 
 #pragma mark - Usernames
 
 + (TSRequest *)usernameSetRequest:(NSString *)username;
 + (TSRequest *)usernameDeleteRequest;
 + (TSRequest *)getProfileRequestWithUsername:(NSString *)username;
+
+#pragma mark - Profiles
+
++ (TSRequest *)profileNameSetRequestWithEncryptedPaddedName:(NSData *)encryptedPaddedName;
+
++ (TSRequest *)versionedProfileSetRequestWithName:(nullable ProfileValue *)name
+                                              bio:(nullable ProfileValue *)bio
+                                         bioEmoji:(nullable ProfileValue *)bioEmoji
+                                        hasAvatar:(BOOL)hasAvatar
+                                          version:(NSString *)version
+                                       commitment:(NSData *)commitment;
+
+#pragma mark - Remote Config
+
++ (TSRequest *)getRemoteConfigRequest;
+
+#pragma mark - Groups v2
+
++ (TSRequest *)groupAuthenticationCredentialRequestWithFromRedemptionDays:(uint32_t)fromRedemptionDays
+                                                         toRedemptionDays:(uint32_t)toRedemptionDays
+    NS_SWIFT_NAME(groupAuthenticationCredentialRequest(fromRedemptionDays:toRedemptionDays:));
 
 @end
 

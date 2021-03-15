@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -12,6 +12,8 @@ import SignalCoreKit
 // MARK: - Record
 
 public struct StickerPackRecord: SDSRecord {
+    public weak var delegate: SDSRecordDelegate?
+
     public var tableMetadata: SDSTableMetadata {
         return StickerPackSerializer.table
     }
@@ -25,7 +27,7 @@ public struct StickerPackRecord: SDSRecord {
     public let recordType: SDSRecordType
     public let uniqueId: String
 
-    // Base class properties
+    // Properties
     public let author: String?
     public let cover: Data
     public let dateCreated: Double
@@ -49,6 +51,14 @@ public struct StickerPackRecord: SDSRecord {
 
     public static func columnName(_ column: StickerPackRecord.CodingKeys, fullyQualified: Bool = false) -> String {
         return fullyQualified ? "\(databaseTableName).\(column.rawValue)" : column.rawValue
+    }
+
+    public func didInsert(with rowID: Int64, for column: String?) {
+        guard let delegate = delegate else {
+            owsFailDebug("Missing delegate.")
+            return
+        }
+        delegate.updateRowId(rowID)
     }
 }
 
@@ -113,7 +123,8 @@ extension StickerPack {
             let items: [StickerPackItem] = try SDSDeserialization.unarchive(itemsSerialized, name: "items")
             let title: String? = record.title
 
-            return StickerPack(uniqueId: uniqueId,
+            return StickerPack(grdbId: recordId,
+                               uniqueId: uniqueId,
                                author: author,
                                cover: cover,
                                dateCreated: dateCreated,
@@ -155,23 +166,67 @@ extension StickerPack: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension StickerPack: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == StickerPack.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let author: String? = modelToCopy.author
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let cover: StickerPackItem = try DeepCopies.deepCopy(modelToCopy.cover)
+            let dateCreated: Date = modelToCopy.dateCreated
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let info: StickerPackInfo = try DeepCopies.deepCopy(modelToCopy.info)
+            let isInstalled: Bool = modelToCopy.isInstalled
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let items: [StickerPackItem] = try DeepCopies.deepCopy(modelToCopy.items)
+            let title: String? = modelToCopy.title
+
+            return StickerPack(grdbId: id,
+                               uniqueId: uniqueId,
+                               author: author,
+                               cover: cover,
+                               dateCreated: dateCreated,
+                               info: info,
+                               isInstalled: isInstalled,
+                               items: items,
+                               title: title)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension StickerPackSerializer {
 
     // This defines all of the columns used in the table
     // where this model (and any subclasses) are persisted.
-    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey, columnIndex: 0)
-    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64, columnIndex: 1)
-    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true, columnIndex: 2)
-    // Base class properties
-    static let authorColumn = SDSColumnMetadata(columnName: "author", columnType: .unicodeString, isOptional: true, columnIndex: 3)
-    static let coverColumn = SDSColumnMetadata(columnName: "cover", columnType: .blob, columnIndex: 4)
-    static let dateCreatedColumn = SDSColumnMetadata(columnName: "dateCreated", columnType: .double, columnIndex: 5)
-    static let infoColumn = SDSColumnMetadata(columnName: "info", columnType: .blob, columnIndex: 6)
-    static let isInstalledColumn = SDSColumnMetadata(columnName: "isInstalled", columnType: .int, columnIndex: 7)
-    static let itemsColumn = SDSColumnMetadata(columnName: "items", columnType: .blob, columnIndex: 8)
-    static let titleColumn = SDSColumnMetadata(columnName: "title", columnType: .unicodeString, isOptional: true, columnIndex: 9)
+    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey)
+    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64)
+    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true)
+    // Properties
+    static let authorColumn = SDSColumnMetadata(columnName: "author", columnType: .unicodeString, isOptional: true)
+    static let coverColumn = SDSColumnMetadata(columnName: "cover", columnType: .blob)
+    static let dateCreatedColumn = SDSColumnMetadata(columnName: "dateCreated", columnType: .double)
+    static let infoColumn = SDSColumnMetadata(columnName: "info", columnType: .blob)
+    static let isInstalledColumn = SDSColumnMetadata(columnName: "isInstalled", columnType: .int)
+    static let itemsColumn = SDSColumnMetadata(columnName: "items", columnType: .blob)
+    static let titleColumn = SDSColumnMetadata(columnName: "title", columnType: .unicodeString, isOptional: true)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -199,14 +254,14 @@ public extension StickerPack {
         sdsSave(saveMode: .insert, transaction: transaction)
     }
 
-    // This method is private; we should never use it directly.
-    // Instead, use anyUpdate(transaction:block:), so that we
-    // use the "update with" pattern.
-    private func anyUpdate(transaction: SDSAnyWriteTransaction) {
-        sdsSave(saveMode: .update, transaction: transaction)
-    }
-
-    @available(*, deprecated, message: "Use anyInsert() or anyUpdate() instead.")
+    // Avoid this method whenever feasible.
+    //
+    // If the record has previously been saved, this method does an overwriting
+    // update of the corresponding row, otherwise if it's a new record, this
+    // method inserts a new row.
+    //
+    // For performance, when possible, you should explicitly specify whether
+    // you are inserting or updating rather than calling this method.
     func anyUpsert(transaction: SDSAnyWriteTransaction) {
         let isInserting: Bool
         if StickerPack.anyFetch(uniqueId: uniqueId, transaction: transaction) != nil {
@@ -257,7 +312,20 @@ public extension StickerPack {
             block(dbCopy)
         }
 
-        dbCopy.anyUpdate(transaction: transaction)
+        dbCopy.sdsSave(saveMode: .update, transaction: transaction)
+    }
+
+    // This method is an alternative to `anyUpdate(transaction:block:)` methods.
+    //
+    // We should generally use `anyUpdate` to ensure we're not unintentionally
+    // clobbering other columns in the database when another concurrent update
+    // has occured.
+    //
+    // There are cases when this doesn't make sense, e.g. when  we know we've
+    // just loaded the model in the same transaction. In those cases it is
+    // safe and faster to do a "overwriting" update
+    func anyOverwritingUpdate(transaction: SDSAnyWriteTransaction) {
+        sdsSave(saveMode: .update, transaction: transaction)
     }
 
     func anyRemove(transaction: SDSAnyWriteTransaction) {
@@ -284,9 +352,11 @@ public extension StickerPack {
 
 @objc
 public class StickerPackCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<StickerPackRecord>?
 
-    init(cursor: RecordCursor<StickerPackRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<StickerPackRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -328,10 +398,10 @@ public extension StickerPack {
         let database = transaction.database
         do {
             let cursor = try StickerPackRecord.fetchCursor(database)
-            return StickerPackCursor(cursor: cursor)
+            return StickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return StickerPackCursor(cursor: nil)
+            return StickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -537,11 +607,11 @@ public extension StickerPack {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try StickerPackRecord.fetchCursor(transaction.database, sqlRequest)
-            return StickerPackCursor(cursor: cursor)
+            return StickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
             Logger.error("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return StickerPackCursor(cursor: nil)
+            return StickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -578,12 +648,12 @@ class StickerPackSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .stickerPack
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
+        // Properties
         let author: String? = model.author
         let cover: Data = requiredArchive(model.cover)
         let dateCreated: Double = archiveDate(model.dateCreated)
@@ -592,6 +662,23 @@ class StickerPackSerializer: SDSSerializer {
         let items: Data = requiredArchive(model.items)
         let title: String? = model.title
 
-        return StickerPackRecord(id: id, recordType: recordType, uniqueId: uniqueId, author: author, cover: cover, dateCreated: dateCreated, info: info, isInstalled: isInstalled, items: items, title: title)
+        return StickerPackRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, author: author, cover: cover, dateCreated: dateCreated, info: info, isInstalled: isInstalled, items: items, title: title)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension StickerPack {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> StickerPack {
+        guard let record = try asRecord() as? StickerPackRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try StickerPack.fromRecord(record)
+    }
+}
+#endif

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -43,7 +43,7 @@ public func BenchAsync(title: String, block: (@escaping () -> Void) -> Void) {
 ///        }
 ///    }
 ///
-public func Bench<T>(title: String, logIfLongerThan intervalLimit: TimeInterval = 0, block: () throws -> T) rethrows -> T {
+public func Bench<T>(title: String, logIfLongerThan intervalLimit: TimeInterval = 0, logInProduction: Bool = false, block: () throws -> T) rethrows -> T {
     let startTime = CACurrentMediaTime()
 
     let value = try block()
@@ -52,7 +52,12 @@ public func Bench<T>(title: String, logIfLongerThan intervalLimit: TimeInterval 
 
     if timeElapsed > intervalLimit {
         let formattedTime = String(format: "%0.2fms", timeElapsed * 1000)
-        Logger.debug("[Bench] title: \(title), duration: \(formattedTime)")
+        let logMessage = "[Bench] title: \(title), duration: \(formattedTime)"
+        if logInProduction {
+            Logger.info(logMessage)
+        } else {
+            Logger.debug(logMessage)
+        }
     }
 
     return value
@@ -91,9 +96,10 @@ public protocol MemorySampler {
 ///
 public func Bench(title: String,
                   memorySamplerRatio: Float,
+                  logInProduction: Bool = false,
                   block: (MemorySampler) throws -> Void) rethrows {
     let memoryBencher = MemoryBencher(title: title, sampleRatio: memorySamplerRatio)
-    try Bench(title: title) {
+    try Bench(title: title, logInProduction: logInProduction) {
         try block(memoryBencher)
         memoryBencher.complete()
     }
@@ -116,20 +122,24 @@ public func Bench(title: String,
 ///
 ///    [BenchManager startEventWithTitle:"message sending" eventId:message.id]
 ///    ...
-///    [BenchManager completeEventWithEventId:eventId:message.id]
+///    [BenchManager completeEventWithEventId:message.id]
 public func BenchEventStart(title: String, eventId: BenchmarkEventId) {
     BenchAsync(title: title) { finish in
-        runningEvents[eventId] = Event(title: title, eventId: eventId, completion: finish)
+        eventQueue.sync {
+            runningEvents[eventId] = Event(title: title, eventId: eventId, completion: finish)
+        }
     }
 }
 
 public func BenchEventComplete(eventId: BenchmarkEventId) {
-    guard let event = runningEvents.removeValue(forKey: eventId) else {
-        Logger.debug("no active event with id: \(eventId)")
-        return
-    }
+    eventQueue.sync {
+        guard let event = runningEvents.removeValue(forKey: eventId) else {
+            Logger.debug("no active event with id: \(eventId)")
+            return
+        }
 
-    event.completion()
+        event.completion()
+    }
 }
 
 public typealias BenchmarkEventId = String
@@ -141,6 +151,7 @@ private struct Event {
 }
 
 private var runningEvents: [BenchmarkEventId: Event] = [:]
+private let eventQueue = DispatchQueue(label: "org.signal.bench")
 
 @objc
 public class BenchManager: NSObject {
@@ -163,6 +174,11 @@ public class BenchManager: NSObject {
     @objc
     public class func bench(title: String, block: () -> Void) {
         Bench(title: title, block: block)
+    }
+
+    @objc
+    public class func bench(title: String, logIfLongerThan intervalLimit: TimeInterval, logInProduction: Bool, block: () -> Void) {
+        Bench(title: title, logIfLongerThan: intervalLimit, logInProduction: logInProduction, block: block)
     }
 }
 
@@ -223,7 +239,7 @@ private class MemoryBencher: MemorySampler {
                 // a failure to measure memory to interfere with running the `block`.
                 return
             }
-            if (currentSize > maxSize) {
+            if currentSize > maxSize {
                 self.maxSize = currentSize
             }
         }
@@ -274,5 +290,61 @@ public extension Bool {
     @inlinable
     static func trueWithProbability(ratio: Float) -> Bool {
         return (0..<ratio).contains(Float.random(in: 0..<1.0))
+    }
+}
+
+// MARK: -
+
+@objc
+public class BenchSteps: NSObject {
+    private var title: String?
+
+    private let startTime: TimeInterval
+    private var lastTime: TimeInterval
+
+    private struct Step {
+        let stepName: String
+        let fromStartInterval: TimeInterval
+        let fromLastInterval: TimeInterval
+
+        func log() {
+            Logger.debug("[Bench] \(stepName), duration: \(format(fromLastInterval)) (\(format(fromStartInterval)))")
+        }
+
+        func format(_ interval: TimeInterval) -> String {
+            return String(format: "%0.2fms", interval * 1000)
+        }
+    }
+    private var steps = [Step]()
+
+    @objc
+    public required init(title: String? = nil) {
+        self.title = title
+
+        startTime = CACurrentMediaTime()
+        lastTime = startTime
+    }
+
+    @objc
+    public func step(_ name: String) {
+        let stepName: String
+        if let title = title {
+            stepName = "\(title).\(name)"
+        } else {
+            stepName = name
+        }
+
+        let now = CACurrentMediaTime()
+        let step = Step(stepName: stepName, fromStartInterval: now - startTime, fromLastInterval: now - lastTime)
+        step.log()
+        steps.append(step)
+        lastTime = now
+    }
+
+    @objc
+    public func logAll() {
+        for step in steps {
+            step.log()
+        }
     }
 }

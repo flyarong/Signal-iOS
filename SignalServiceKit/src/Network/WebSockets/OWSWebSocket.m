@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSWebSocket.h"
@@ -12,7 +12,6 @@
 #import "OWSDevicesService.h"
 #import "OWSError.h"
 #import "OWSMessageManager.h"
-#import "OWSMessageReceiver.h"
 #import "OWSSignalService.h"
 #import "SSKEnvironment.h"
 #import "TSAccountManager.h"
@@ -41,7 +40,7 @@ static const NSTimeInterval kKeepAliveDuration_MakeRequestInBackground = 20.f;
 // d) It has just received the response to a request.
 static const NSTimeInterval kKeepAliveDuration_ReceiveResponse = 5.f;
 
-NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_OWSWebSocketStateDidChange";
+NSNotificationName const NSNotificationWebSocketStateDidChange = @"NSNotificationWebSocketStateDidChange";
 
 @interface TSSocketMessage : NSObject
 
@@ -51,6 +50,7 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 @property (nonatomic) BOOL hasCompleted;
 @property (nonatomic, readonly) OWSBackgroundTask *backgroundTask;
 
++ (instancetype)new NS_UNAVAILABLE;
 - (instancetype)init NS_UNAVAILABLE;
 
 @end
@@ -125,7 +125,11 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
         self.hasCompleted = YES;
     }
 
-    OWSLogError(@"didFailWithStatusCode: %zd, %@", statusCode, error);
+    if (statusCode != 404) {
+        OWSLogError(@"didFailWithStatusCode: %zd, %@", statusCode, error);
+    } else {
+        OWSLogVerbose(@"didFailWithStatusCode: %zd, %@", statusCode, error);
+    }
 
     OWSAssertDebug(self.success);
     OWSAssertDebug(self.failure);
@@ -167,6 +171,8 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 //
 // We only ever access this state on the main thread.
 @property (nonatomic) OWSWebSocketState state;
+@property (nonatomic) BOOL hasEmptiedInitialQueue;
+@property (nonatomic) BOOL willEmptyInitialQueue;
 
 #pragma mark -
 
@@ -215,6 +221,8 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
     OWSAssertIsOnMainThread();
 
     _state = OWSWebSocketStateClosed;
+    _hasEmptiedInitialQueue = NO;
+    _willEmptyInitialQueue = NO;
     _socketMessageMap = [NSMutableDictionary new];
 
     return self;
@@ -229,22 +237,17 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 
 - (OWSSignalService *)signalService
 {
-    return [OWSSignalService sharedInstance];
-}
-
-- (OWSMessageReceiver *)messageReceiver
-{
-    return SSKEnvironment.shared.messageReceiver;
+    return [OWSSignalService shared];
 }
 
 - (TSAccountManager *)tsAccountManager
 {
-    return TSAccountManager.sharedInstance;
+    return TSAccountManager.shared;
 }
 
 - (OutageDetection *)outageDetection
 {
-    return OutageDetection.sharedManager;
+    return OutageDetection.shared;
 }
 
 - (SDSDatabaseStorage *)databaseStorage
@@ -284,7 +287,7 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(registrationStateDidChange:)
-                                                 name:RegistrationStateDidChangeNotification
+                                                 name:NSNotificationNameRegistrationStateDidChange
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(isCensorshipCircumventionActiveDidChange:)
@@ -292,7 +295,15 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(deviceListUpdateModifiedDeviceList:)
-                                                 name:NSNotificationName_DeviceListUpdateModifiedDeviceList
+                                                 name:NSNotificationNameDeviceListUpdateModifiedDeviceList
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(environmentDidChange:)
+                                                 name:TSConstants.EnvironmentDidChange
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(appExpiryDidChange:)
+                                                 name:AppExpiry.AppExpiryDidChange
                                                object:nil];
 }
 
@@ -362,6 +373,11 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 {
     OWSAssertIsOnMainThread();
 
+    if (state != OWSWebSocketStateOpen) {
+        self.hasEmptiedInitialQueue = NO;
+        self.willEmptyInitialQueue = NO;
+    }
+
     // If this state update is redundant, verify that
     // class state and socket state are aligned.
     //
@@ -415,9 +431,10 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 
             // Create a new web socket.
             NSString *webSocketConnect =
-                [textSecureWebSocketAPI stringByAppendingString:[self webSocketAuthenticationString]];
+                [TSConstants.textSecureWebSocketAPI stringByAppendingString:[self webSocketAuthenticationString]];
             NSURL *webSocketConnectURL = [NSURL URLWithString:webSocketConnect];
             NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:webSocketConnectURL];
+            [request setValue:OWSURLSession.signalIosUserAgent forHTTPHeaderField:OWSURLSession.kUserAgentHeader];
 
             id<SSKWebSocket> socket = [SSKWebSocketManager buildSocketWithRequest:request];
             socket.delegate = self;
@@ -444,7 +461,7 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 
 - (void)notifyStatusChange
 {
-    [[NSNotificationCenter defaultCenter] postNotificationNameAsync:kNSNotification_OWSWebSocketStateDidChange
+    [[NSNotificationCenter defaultCenter] postNotificationNameAsync:NSNotificationWebSocketStateDidChange
                                                              object:nil
                                                            userInfo:nil];
 }
@@ -512,6 +529,9 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
         }
     }
 
+    OWSHttpHeaders *httpHeaders = [OWSHttpHeaders new];
+    [httpHeaders addHeaders:request.allHTTPHeaderFields overwriteOnConflict:NO];
+
     WebSocketProtoWebSocketRequestMessageBuilder *requestBuilder =
         [WebSocketProtoWebSocketRequestMessage builderWithVerb:request.HTTPMethod
                                                           path:requestPath
@@ -519,14 +539,17 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
     if (jsonData) {
         // TODO: Do we need body & headers for requests with no parameters?
         [requestBuilder setBody:jsonData];
-        [requestBuilder addHeaders:@"content-type:application/json"];
+        [httpHeaders addHeader:@"content-type" value:@"application/json" overwriteOnConflict:YES];
     }
 
-    for (NSString *headerField in request.allHTTPHeaderFields) {
-        NSString *headerValue = request.allHTTPHeaderFields[headerField];
+    // Set User-Agent header.
+    [httpHeaders addHeader:OWSURLSession.kUserAgentHeader
+                      value:OWSURLSession.signalIosUserAgent
+        overwriteOnConflict:YES];
 
-        OWSAssertDebug([headerField isKindOfClass:[NSString class]]);
-        OWSAssertDebug([headerValue isKindOfClass:[NSString class]]);
+    for (NSString *headerField in httpHeaders.headers) {
+        NSString *_Nullable headerValue = httpHeaders.headers[headerField];
+        OWSAssertDebug(headerValue != nil);
         [requestBuilder addHeaders:[NSString stringWithFormat:@"%@:%@", headerField, headerValue]];
     }
 
@@ -554,12 +577,7 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
         return;
     }
 
-    BOOL wasScheduled = [self.websocket writeData:messageData error:&error];
-    if (!wasScheduled || error) {
-        OWSFailDebug(@"could not send socket request: %@", error);
-        [socketMessage didFailBeforeSending];
-        return;
-    }
+    [self.websocket writeData:messageData];
     OWSLogInfo(@"making request: %llu, %@: %@, jsonData.length: %zd",
         socketMessage.requestId,
         request.HTTPMethod,
@@ -604,6 +622,12 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
     NSData *_Nullable responseData;
     if (message.hasBody) {
         responseData = message.body;
+    }
+
+    // The websocket is only used to connect to the main signal
+    // service, so we need to check for remote deprecation.
+    if (responseStatus == AppExpiry.appExpiredStatusCode) {
+        [AppExpiry.shared setHasAppExpiredAtCurrentVersion];
     }
 
     BOOL hasValidResponse = YES;
@@ -719,7 +743,7 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
     [self handleSocketFailure];
 }
 
-- (void)websocketDidReceiveDataWithSocket:(id<SSKWebSocket>)websocket data:(NSData *)data
+- (void)websocket:(id<SSKWebSocket>)websocket didReceiveMessage:(WebSocketProtoWebSocketMessage *)message
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(websocket);
@@ -732,19 +756,12 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
     // If we receive a response, we know we're not de-registered.
     [self.tsAccountManager setIsDeregistered:NO];
 
-    NSError *error;
-    WebSocketProtoWebSocketMessage *_Nullable wsMessage = [WebSocketProtoWebSocketMessage parseData:data error:&error];
-    if (!wsMessage || error) {
-        OWSFailDebug(@"could not parse proto: %@", error);
-        return;
-    }
-
-    if (!wsMessage.hasType) {
+    if (!message.hasType) {
         OWSFailDebug(@"webSocket:didReceiveMessage: missing type.");
-    } else if (wsMessage.unwrappedType == WebSocketProtoWebSocketMessageTypeRequest) {
-        [self processWebSocketRequestMessage:wsMessage.request];
-    } else if (wsMessage.unwrappedType == WebSocketProtoWebSocketMessageTypeResponse) {
-        [self processWebSocketResponseMessage:wsMessage.response];
+    } else if (message.unwrappedType == WebSocketProtoWebSocketMessageTypeRequest) {
+        [self processWebSocketRequestMessage:message.request];
+    } else if (message.unwrappedType == WebSocketProtoWebSocketMessageTypeResponse) {
+        [self processWebSocketResponseMessage:message.response];
     } else {
         OWSFailDebug(@"webSocket:didReceiveMessage: unknown.");
     }
@@ -779,50 +796,79 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
             [OWSBackgroundTask backgroundTaskWithLabelStr:__PRETTY_FUNCTION__];
 
         dispatch_async(self.serialQueue, ^{
-            BOOL success = NO;
-            @try {
-                BOOL useSignalingKey = [message.headers containsObject:@"X-Signal-Key: true"];
-                NSData *_Nullable decryptedPayload;
-                if (useSignalingKey) {
-                    NSString *_Nullable signalingKey = self.tsAccountManager.storedSignalingKey;
-                    OWSAssertDebug(signalingKey);
-                    decryptedPayload =
-                        [Cryptography decryptAppleMessagePayload:message.body withSignalingKey:signalingKey];
-                } else {
-                    OWSAssertDebug([message.headers containsObject:@"X-Signal-Key: false"]);
-
-                    decryptedPayload = message.body;
+            void (^ackMessage)(BOOL success) = ^void(BOOL success) {
+                if (!success) {
+                    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+                        ThreadlessErrorMessage *errorMessage = [ThreadlessErrorMessage corruptedMessageInUnknownThread];
+                        [self.notificationsManager notifyUserForThreadlessErrorMessage:errorMessage
+                                                                           transaction:transaction];
+                    });
                 }
 
-                if (!decryptedPayload) {
-                    OWSLogWarn(@"Failed to decrypt incoming payload or bad HMAC");
-                } else {
-                    [self.messageReceiver handleReceivedEnvelopeData:decryptedPayload];
-                    success = YES;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self sendWebSocketMessageAcknowledgement:message];
+                    OWSAssertDebug(backgroundTask);
+                    backgroundTask = nil;
+                });
+            };
+
+            uint64_t serverDeliveryTimestamp = 0;
+            for (NSString *header in message.headers) {
+                if ([header hasPrefix:@"X-Signal-Timestamp:"]) {
+                    NSArray<NSString *> *components = [header componentsSeparatedByString:@":"];
+                    if (components.count == 2) {
+                        serverDeliveryTimestamp = (uint64_t)[components[1] longLongValue];
+                    } else {
+                        OWSFailDebug(@"Invalidly formatted timestamp header %@", header);
+                    }
                 }
-            } @catch (NSException *exception) {
-                OWSFailDebug(@"Received an invalid envelope: %@", exception.debugDescription);
-                // TODO: Add analytics.
             }
 
-            if (!success) {
-                [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-                    ThreadlessErrorMessage *errorMessage = [ThreadlessErrorMessage corruptedMessageInUnknownThread];
-                    [self.notificationsManager notifyUserForThreadlessErrorMessage:errorMessage
-                                                                       transaction:transaction];
-                }];
+            if (serverDeliveryTimestamp == 0) {
+                OWSFailDebug(@"Missing server delivery timestamp");
             }
 
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self sendWebSocketMessageAcknowledgement:message];
-                OWSAssertDebug(backgroundTask);
-                backgroundTask = nil;
-            });
+            NSData *_Nullable encryptedEnvelope = message.body;
+
+            if (!encryptedEnvelope) {
+                OWSLogWarn(@"Missing encrypted envelope on message");
+                ackMessage(NO);
+            } else {
+                [MessageProcessor.shared processEncryptedEnvelopeData:encryptedEnvelope
+                                                    encryptedEnvelope:nil
+                                              serverDeliveryTimestamp:serverDeliveryTimestamp
+                                                           completion:^(NSError *error) { ackMessage(YES); }];
+            }
         });
     } else if ([message.path isEqualToString:@"/api/v1/queue/empty"]) {
         // Queue is drained.
 
         [self sendWebSocketMessageAcknowledgement:message];
+
+        if (!self.hasEmptiedInitialQueue) {
+
+            self.willEmptyInitialQueue = YES;
+
+            // We need to flush the serial queue to ensure that
+            // all received messages are enqueued by the message
+            // receiver before we: a) mark the queue as empty.
+            // b) notify.
+            //
+            // The socket might close and re-open while we're
+            // flushing the queue. We use willEmptyInitialQueue
+            // to detect this case.
+            dispatch_async(self.serialQueue, ^{
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (!self.willEmptyInitialQueue) {
+                        return;
+                    }
+                    self.willEmptyInitialQueue = NO;
+                    self.hasEmptiedInitialQueue = YES;
+
+                    [self notifyStatusChange];
+                });
+            });
+        }
     } else {
         OWSLogWarn(@"Unsupported WebSocket Request");
 
@@ -833,32 +879,14 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 - (void)sendWebSocketMessageAcknowledgement:(WebSocketProtoWebSocketRequestMessage *)request
 {
     OWSAssertIsOnMainThread();
-
     NSError *error;
-
-    WebSocketProtoWebSocketResponseMessageBuilder *responseBuilder =
-        [WebSocketProtoWebSocketResponseMessage builderWithRequestID:request.requestID status:200];
-    [responseBuilder setMessage:@"OK"];
-    WebSocketProtoWebSocketResponseMessage *_Nullable response = [responseBuilder buildAndReturnError:&error];
-    if (!response || error) {
-        OWSFailDebug(@"could not build proto: %@", error);
-        return;
-    }
-
-    WebSocketProtoWebSocketMessageBuilder *messageBuilder = [WebSocketProtoWebSocketMessage builder];
-    [messageBuilder setType:WebSocketProtoWebSocketMessageTypeResponse];
-    [messageBuilder setResponse:response];
-
-    NSData *_Nullable messageData = [messageBuilder buildSerializedDataAndReturnError:&error];
-    if (!messageData || error) {
-        OWSFailDebug(@"could not serialize proto: %@", error);
-        return;
-    }
-
-    [self.websocket writeData:messageData error:&error];
-    if (error) {
-        OWSLogWarn(@"Error while trying to write on websocket %@", error);
-        [self handleSocketFailure];
+    BOOL didSucceed = [self.websocket sendResponseForRequest:request status:200 message:@"OK" error:&error];
+    if (!didSucceed) {
+        if (IsNetworkConnectivityFailure(error)) {
+            OWSLogWarn(@"Error: %@", error);
+        } else {
+            OWSFailDebug(@"Error: %@", error);
+        }
     }
 }
 
@@ -894,12 +922,7 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
     OWSAssertIsOnMainThread();
 
     if ([self shouldSocketBeOpen]) {
-        NSError *error;
-        [self.websocket writePingAndReturnError:&error];
-        if (error) {
-            OWSLogWarn(@"Error in websocket heartbeat: %@", error.localizedDescription);
-            [self handleSocketFailure];
-        }
+        [self.websocket writePing];
     } else {
         OWSLogWarn(@"webSocketHeartBeat closing web socket");
         [self closeWebSocket];
@@ -909,9 +932,10 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 
 - (NSString *)webSocketAuthenticationString
 {
-    return [NSString stringWithFormat:@"?login=%@&password=%@",
-                     [TSAccountManager.localAddress.serviceIdentifier stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"],
-                     self.tsAccountManager.storedServerAuthToken];
+
+    NSString *login = [self.tsAccountManager.storedServerUsername stringByReplacingOccurrencesOfString:@"+"
+                                                                                            withString:@"%2B"];
+    return [NSString stringWithFormat:@"?login=%@&password=%@", login, self.tsAccountManager.storedServerAuthToken];
 }
 
 #pragma mark - Socket LifeCycle
@@ -925,7 +949,15 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
         return NO;
     }
 
+    if (!AppReadiness.isAppReady) {
+        return NO;
+    }
+
     if (![self.tsAccountManager isRegisteredAndReady]) {
+        return NO;
+    }
+
+    if (AppExpiry.shared.isExpired) {
         return NO;
     }
 
@@ -936,6 +968,8 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 
     if (self.appIsActive) {
         // If app is active, keep web socket alive.
+        return YES;
+    } else if (SSKDebugFlags.keepWebSocketOpenInBackground) {
         return YES;
     } else if (self.backgroundKeepAliveUntilDate && [self.backgroundKeepAliveUntilDate timeIntervalSinceNow] > 0.f) {
         OWSAssertDebug(self.backgroundKeepAliveTimer);
@@ -1039,11 +1073,8 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 
     if (!AppReadiness.isAppReady) {
         static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-                [self applyDesiredSocketState];
-            }];
-        });
+        dispatch_once(
+            &onceToken, ^{ AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{ [self applyDesiredSocketState]; }); });
         return;
     }
 
@@ -1140,8 +1171,22 @@ NSString *const kNSNotification_OWSWebSocketStateDidChange = @"kNSNotification_O
 - (void)deviceListUpdateModifiedDeviceList:(NSNotification *)notification
 {
     OWSAssertIsOnMainThread();
-
+    
     [self cycleSocket];
+}
+
+- (void)environmentDidChange:(NSNotification *)notification
+{
+    OWSAssertIsOnMainThread();
+    
+    [self cycleSocket];
+}
+
+- (void)appExpiryDidChange:(NSNotification *)notification
+{
+    OWSAssertIsOnMainThread();
+
+    [self applyDesiredSocketState];
 }
 
 @end

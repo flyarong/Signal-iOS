@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,7 +10,7 @@ class AppUpdateNag: NSObject {
 
     // MARK: Public
 
-    @objc(sharedInstance)
+    @objc(shared)
     public static let shared: AppUpdateNag = {
         let versionService = AppStoreVersionService()
         let nagManager = AppUpdateNag(versionService: versionService)
@@ -47,7 +47,7 @@ class AppUpdateNag: NSObject {
             self.showUpdateNagIfEnoughTimeHasPassed(appStoreRecord: appStoreRecord)
         }.catch { error in
             Logger.warn("failed with error: \(error)")
-        }.retainUntilComplete()
+        }
     }
 
     // MARK: - Internal
@@ -113,7 +113,7 @@ class AppUpdateNag: NSObject {
             }
         }
 
-        // Only show nag if we are "at rest" in the home view or registration view without any
+        // Only show nag if we are "at rest" in the conversation split or registration view without any
         // alerts or dialogs showing.
         guard let frontmostViewController = UIApplication.shared.frontmostViewController else {
             owsFailDebug("frontmostViewController was unexpectedly nil")
@@ -121,7 +121,7 @@ class AppUpdateNag: NSObject {
         }
 
         switch frontmostViewController {
-        case is HomeViewController, is OnboardingSplashViewController:
+        case is ConversationSplitViewController, is OnboardingSplashViewController:
             self.setLastNagDate(Date())
             self.clearFirstHeardOfNewVersionDate()
             presentUpgradeNag(appStoreRecord: appStoreRecord)
@@ -139,9 +139,9 @@ class AppUpdateNag: NSObject {
         let updateButtonText = NSLocalizedString("APP_UPDATE_NAG_ALERT_UPDATE_BUTTON", comment: "Label for the 'update' button in the 'new app version available' alert.")
         let dismissButtonText = NSLocalizedString("APP_UPDATE_NAG_ALERT_DISMISS_BUTTON", comment: "Label for the 'dismiss' button in the 'new app version available' alert.")
 
-        let alert = UIAlertController(title: title, message: bodyText, preferredStyle: .alert)
+        let alert = ActionSheetController(title: title, message: bodyText)
 
-        let updateAction = UIAlertAction(title: updateButtonText, style: .default) { [weak self] _ in
+        let updateAction = ActionSheetAction(title: updateButtonText, style: .default) { [weak self] _ in
             guard let strongSelf = self else {
                 return
             }
@@ -150,11 +150,11 @@ class AppUpdateNag: NSObject {
         }
 
         alert.addAction(updateAction)
-        alert.addAction(UIAlertAction(title: dismissButtonText, style: .cancel) { _ in
+        alert.addAction(ActionSheetAction(title: dismissButtonText, style: .cancel) { _ in
             Logger.info("dismissed upgrade notice")
         })
 
-        OWSAlerts.showAlert(alert)
+        OWSActionSheets.showActionSheet(alert)
     }
 
     func showAppStore(appStoreURL: URL) {
@@ -162,13 +162,13 @@ class AppUpdateNag: NSObject {
 
         Logger.debug("")
 
-        UIApplication.shared.openURL(appStoreURL)
+        UIApplication.shared.open(appStoreURL, options: [:])
     }
 
     // MARK: Storage
 
     var firstHeardOfNewVersionDate: Date? {
-        return self.databaseStorage.readReturningResult { transaction in
+        return self.databaseStorage.read { transaction in
             return self.keyValueStore.getDate(AppUpdateNag.kFirstHeardOfNewVersionDateKey, transaction: transaction)
         }
     }
@@ -186,7 +186,7 @@ class AppUpdateNag: NSObject {
     }
 
     var lastNagDate: Date? {
-        return self.databaseStorage.readReturningResult { transaction in
+        return self.databaseStorage.read { transaction in
             return self.keyValueStore.getDate(AppUpdateNag.kLastNagDateKey, transaction: transaction)
         }
     }
@@ -224,7 +224,11 @@ class AppStoreVersionService: NSObject {
 
         let (promise, resolver) = Promise<AppStoreRecord>.pending()
 
-        let task = URLSession.ephemeral.dataTask(with: lookupURL) { (data, _, error) in
+        let task = URLSession.ephemeral.dataTask(with: lookupURL) { (data, _, networkError) in
+            if let networkError = networkError {
+                return resolver.reject(networkError)
+            }
+
             guard let data = data else {
                 Logger.warn("data was unexpectedly nil")
                 resolver.reject(OWSErrorMakeUnableToProcessServerResponseError())

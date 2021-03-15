@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -11,7 +11,15 @@ public protocol ContactShareApprovalViewControllerDelegate: class {
                              didApproveContactShare contactShare: ContactShareViewModel)
     func approveContactShare(_ approveContactShare: ContactShareApprovalViewController,
                              didCancelContactShare contactShare: ContactShareViewModel)
+
+    func contactApprovalCustomTitle(_ contactApproval: ContactShareApprovalViewController) -> String?
+
+    func contactApprovalRecipientsDescription(_ contactApproval: ContactShareApprovalViewController) -> String?
+
+    func contactApprovalMode(_ contactApproval: ContactShareApprovalViewController) -> ApprovalMode
 }
+
+// MARK: -
 
 protocol ContactShareField: class {
 
@@ -55,7 +63,7 @@ class ContactShareFieldBase<ContactFieldType: OWSContactField>: NSObject, Contac
     }
 
     func applyToContact(contact: ContactShareViewModel) {
-        preconditionFailure("This method must be overridden")
+        notImplemented()
     }
 }
 
@@ -218,13 +226,11 @@ class ContactShareFieldView: UIStackView {
 
 // MARK: -
 
-// TODO: Rename to ContactShareApprovalViewController
 @objc
 public class ContactShareApprovalViewController: OWSViewController, EditContactShareNameViewControllerDelegate, ContactShareFieldViewDelegate {
 
-    weak var delegate: ContactShareApprovalViewControllerDelegate?
-
-    let contactsManager: OWSContactsManager
+    @objc
+    public weak var delegate: ContactShareApprovalViewControllerDelegate?
 
     var contactShare: ContactShareViewModel
 
@@ -232,20 +238,40 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
 
     var nameLabel: UILabel!
 
-    // MARK: Initializers
+    private let footerView = ApprovalFooterView()
 
-    @available(*, unavailable, message:"use other constructor instead.")
-    required public init?(coder aDecoder: NSCoder) {
-        notImplemented()
+    private var approvalMode: ApprovalMode {
+        guard let delegate = delegate else {
+            return .send
+        }
+        return delegate.contactApprovalMode(self)
     }
 
-    @objc
-    required public init(contactShare: ContactShareViewModel, contactsManager: OWSContactsManager, delegate: ContactShareApprovalViewControllerDelegate) {
-        self.contactsManager = contactsManager
-        self.contactShare = contactShare
-        self.delegate = delegate
+    // MARK: - UIViewController
 
-        super.init(nibName: nil, bundle: nil)
+    public override var canBecomeFirstResponder: Bool {
+        return true
+    }
+
+    var currentInputAcccessoryView: UIView? {
+        didSet {
+            if oldValue != currentInputAcccessoryView {
+                reloadInputViews()
+            }
+        }
+    }
+
+    public override var inputAccessoryView: UIView? {
+        return currentInputAcccessoryView
+    }
+
+    // MARK: Initializers
+
+    @objc
+    required public init(contactShare: ContactShareViewModel) {
+        self.contactShare = contactShare
+
+        super.init()
 
         buildFields()
     }
@@ -303,7 +329,7 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
     override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        updateNavigationBar()
+        updateControls()
     }
 
     override public func viewDidAppear(_ animated: Bool) {
@@ -321,14 +347,20 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
     override public func loadView() {
         super.loadView()
 
-        self.navigationItem.title = NSLocalizedString("CONTACT_SHARE_APPROVAL_VIEW_TITLE",
-                                                      comment: "Title for the 'Approve contact share' view.")
+        if let title = delegate?.contactApprovalCustomTitle(self) {
+            self.navigationItem.title = title
+        } else {
+            self.navigationItem.title = NSLocalizedString("CONTACT_SHARE_APPROVAL_VIEW_TITLE",
+                                                          comment: "Title for the 'Approve contact share' view.")
+        }
 
         self.view.backgroundColor = Theme.backgroundColor
 
+        footerView.delegate = self
+
         updateContent()
 
-        updateNavigationBar()
+        updateControls()
     }
 
     func isAtLeastOneFieldSelected() -> Bool {
@@ -340,14 +372,21 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
         return false
     }
 
-    func updateNavigationBar() {
+    func updateControls() {
         self.navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel,
                                                                 target: self,
                                                                 action: #selector(didPressCancel))
 
-        self.navigationItem.rightBarButtonItem = UIBarButtonItem(title: NSLocalizedString("ATTACHMENT_APPROVAL_SEND_BUTTON",
-                                                                                          comment: "Label for 'send' button in the 'attachment approval' dialog."),
-                                                                 style: .plain, target: self, action: #selector(didPressSendButton))
+        guard isAtLeastOneFieldSelected() else {
+            currentInputAcccessoryView = nil
+            return
+        }
+        guard let recipientsDescription = delegate?.contactApprovalRecipientsDescription(self) else {
+            currentInputAcccessoryView = nil
+            return
+        }
+        footerView.setNamesText(recipientsDescription, animated: false)
+        currentInputAcccessoryView = footerView
     }
 
     private func updateContent() {
@@ -369,7 +408,7 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
         scrollView.autoPinEdge(toSuperviewSafeArea: .leading)
         scrollView.autoPinEdge(toSuperviewSafeArea: .trailing)
         scrollView.autoPin(toTopLayoutGuideOf: self, withInset: 0)
-        scrollView.autoPinEdge(toSuperviewEdge: .bottom)
+        autoPinView(toBottomOfViewControllerOrKeyboard: scrollView, avoidNotch: true)
 
         let fieldsView = createFieldsView()
 
@@ -416,15 +455,15 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
         let nameLabel = UILabel()
         self.nameLabel = nameLabel
         nameLabel.text = contactShare.name.displayName
-        nameLabel.font = UIFont.ows_dynamicTypeBody.ows_mediumWeight()
-        nameLabel.textColor = Theme.primaryColor
+        nameLabel.font = UIFont.ows_dynamicTypeBody.ows_semibold
+        nameLabel.textColor = Theme.primaryTextColor
         nameLabel.lineBreakMode = .byTruncatingTail
         stackView.addArrangedSubview(nameLabel)
 
         let editNameLabel = UILabel()
         editNameLabel.text = NSLocalizedString("CONTACT_EDIT_NAME_BUTTON", comment: "Label for the 'edit name' button in the contact share approval view.")
         editNameLabel.font = UIFont.ows_dynamicTypeBody
-        editNameLabel.textColor = UIColor.ows_materialBlue
+        editNameLabel.textColor = Theme.accentBlueColor
         stackView.addArrangedSubview(editNameLabel)
         editNameLabel.setContentHuggingHigh()
         editNameLabel.setCompressionResistanceHigh()
@@ -448,16 +487,17 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
 
     // MARK: -
 
-    @objc func didPressSendButton() {
+    @objc
+    func didPressSendButton() {
         AssertIsOnMainThread()
 
         guard isAtLeastOneFieldSelected() else {
-            OWSAlerts.showErrorAlert(message: NSLocalizedString("CONTACT_SHARE_NO_FIELDS_SELECTED",
+            OWSActionSheets.showErrorAlert(message: NSLocalizedString("CONTACT_SHARE_NO_FIELDS_SELECTED",
                                                                 comment: "Error indicating that at least one contact field must be selected before sharing a contact."))
             return
         }
         guard contactShare.ows_isValid else {
-            OWSAlerts.showErrorAlert(message: NSLocalizedString("CONTACT_SHARE_INVALID_CONTACT",
+            OWSActionSheets.showErrorAlert(message: NSLocalizedString("CONTACT_SHARE_INVALID_CONTACT",
                                                                 comment: "Error indicating that an invalid contact cannot be shared."))
             return
         }
@@ -502,12 +542,24 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
 
         nameLabel.text = contactShare.name.displayName
 
-        self.updateNavigationBar()
+        updateControls()
     }
 
     // MARK: - ContactShareFieldViewDelegate
 
     public func contactShareFieldViewDidChangeSelectedState() {
-        self.updateNavigationBar()
+        updateControls()
+    }
+}
+
+// MARK: -
+
+extension ContactShareApprovalViewController: ApprovalFooterDelegate {
+    public func approvalFooterDelegateDidRequestProceed(_ approvalFooterView: ApprovalFooterView) {
+        didPressSendButton()
+    }
+
+    public func approvalMode(_ approvalFooterView: ApprovalFooterView) -> ApprovalMode {
+        return approvalMode
     }
 }

@@ -1,12 +1,13 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import SignalServiceKit
 import SignalMessaging
 
-@objc public class AppEnvironment: NSObject {
+@objc
+public class AppEnvironment: NSObject {
 
     private static var _shared: AppEnvironment = AppEnvironment()
 
@@ -32,10 +33,7 @@ import SignalMessaging
     public var callService: CallService
 
     @objc
-    public var outboundCallInitiator: OutboundCallInitiator
-
-    @objc
-    public var messageFetcherJob: MessageFetcherJob
+    public var outboundIndividualCallInitiator: OutboundIndividualCallInitiator
 
     @objc
     public var accountManager: AccountManager
@@ -50,54 +48,31 @@ import SignalMessaging
     public var sessionResetJobQueue: SessionResetJobQueue
 
     @objc
-    public var broadcastMediaMessageJobQueue: BroadcastMediaMessageJobQueue
-
-    @objc
     public var backup: OWSBackup
 
-    private var _legacyNotificationActionHandler: LegacyNotificationActionHandler
     @objc
-    public var legacyNotificationActionHandler: LegacyNotificationActionHandler {
-        get {
-            if #available(iOS 10, *) {
-                owsFailDebug("shouldn't user legacyNotificationActionHandler on modern iOS")
-            }
-            return _legacyNotificationActionHandler
-        }
-        set {
-            _legacyNotificationActionHandler = newValue
-        }
-    }
-
-    // Stored properties cannot be marked as `@available`, only classes and functions.
-    // Instead, store a private `Any` and wrap it with a public `@available` getter
-    private var _userNotificationActionHandler: Any?
-
-    @objc
-    @available(iOS 10.0, *)
-    public var userNotificationActionHandler: UserNotificationActionHandler {
-        return _userNotificationActionHandler as! UserNotificationActionHandler
-    }
+    public var userNotificationActionHandler: UserNotificationActionHandler
 
     @objc
     public var backupLazyRestore: BackupLazyRestore
 
+    @objc
+    let deviceTransferService = DeviceTransferService()
+
+    @objc
+    let audioPlayer = CVAudioPlayer()
+
     private override init() {
         self.callMessageHandler = WebRTCCallMessageHandler()
         self.callService = CallService()
-        self.outboundCallInitiator = OutboundCallInitiator()
-        self.messageFetcherJob = MessageFetcherJob()
+        self.outboundIndividualCallInitiator = OutboundIndividualCallInitiator()
         self.accountManager = AccountManager()
         self.notificationPresenter = NotificationPresenter()
         self.pushRegistrationManager = PushRegistrationManager()
         self.sessionResetJobQueue = SessionResetJobQueue()
-        self.broadcastMediaMessageJobQueue = BroadcastMediaMessageJobQueue()
         self.backup = OWSBackup()
         self.backupLazyRestore = BackupLazyRestore()
-        if #available(iOS 10.0, *) {
-            self._userNotificationActionHandler = UserNotificationActionHandler()
-        }
-        self._legacyNotificationActionHandler = LegacyNotificationActionHandler()
+        self.userNotificationActionHandler = UserNotificationActionHandler()
 
         super.init()
 
@@ -105,12 +80,11 @@ import SignalMessaging
 
         YDBToGRDBMigration.add(keyStore: backup.keyValueStore, label: "backup")
         YDBToGRDBMigration.add(keyStore: AppUpdateNag.shared.keyValueStore, label: "AppUpdateNag")
-        YDBToGRDBMigration.add(keyStore: ProfileViewController.keyValueStore(), label: "ProfileViewController")
     }
 
     @objc
     public func setup() {
-        callService.createCallUIAdapter()
+        callService.individualCallService.createCallUIAdapter()
 
         // Hang certain singletons on SSKEnvironment too.
         SSKEnvironment.shared.notificationsManager = notificationPresenter

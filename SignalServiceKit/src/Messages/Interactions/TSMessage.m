@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSMessage.h"
@@ -13,6 +13,7 @@
 #import "TSThread.h"
 #import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalCoreKit/NSString+OWS.h>
+#import <SignalServiceKit/OWSDisappearingMessagesJob.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -24,6 +25,8 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 @interface TSMessage ()
 
 @property (nonatomic, nullable) NSString *body;
+@property (nonatomic, nullable) MessageBodyRanges *bodyRanges;
+
 @property (nonatomic) uint32_t expiresInSeconds;
 @property (nonatomic) uint64_t expireStartedAt;
 
@@ -53,6 +56,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
 @property (nonatomic) BOOL isViewOnceMessage;
 @property (nonatomic) BOOL isViewOnceComplete;
+@property (nonatomic) BOOL wasRemotelyDeleted;
 
 // This property is only intended to be used by GRDB queries.
 @property (nonatomic, readonly) BOOL storedShouldStartExpireTimer;
@@ -63,19 +67,9 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
 @implementation TSMessage
 
-- (instancetype)initMessageWithTimestamp:(uint64_t)timestamp
-                                inThread:(TSThread *)thread
-                             messageBody:(nullable NSString *)body
-                           attachmentIds:(NSArray<NSString *> *)attachmentIds
-                        expiresInSeconds:(uint32_t)expiresInSeconds
-                         expireStartedAt:(uint64_t)expireStartedAt
-                           quotedMessage:(nullable TSQuotedMessage *)quotedMessage
-                            contactShare:(nullable OWSContact *)contactShare
-                             linkPreview:(nullable OWSLinkPreview *)linkPreview
-                          messageSticker:(nullable MessageSticker *)messageSticker
-                       isViewOnceMessage:(BOOL)isViewOnceMessage
+- (instancetype)initMessageWithBuilder:(TSMessageBuilder *)messageBuilder
 {
-    self = [super initInteractionWithTimestamp:timestamp inThread:thread];
+    self = [super initInteractionWithTimestamp:messageBuilder.timestamp thread:messageBuilder.thread];
 
     if (!self) {
         return self;
@@ -83,17 +77,26 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
     _schemaVersion = OWSMessageSchemaVersion;
 
-    _body = body;
-    _attachmentIds = attachmentIds ? [attachmentIds mutableCopy] : [NSMutableArray new];
-    _expiresInSeconds = expiresInSeconds;
-    _expireStartedAt = expireStartedAt;
+    if (messageBuilder.messageBody.length > 0) {
+        _body = messageBuilder.messageBody;
+        _bodyRanges = messageBuilder.bodyRanges;
+    } else if (messageBuilder.messageBody != nil) {
+        OWSFailDebug(@"Empty message body.");
+    }
+    _attachmentIds = messageBuilder.attachmentIds;
+    _expiresInSeconds = messageBuilder.expiresInSeconds;
+    _expireStartedAt = messageBuilder.expireStartedAt;
     [self updateExpiresAt];
-    _quotedMessage = quotedMessage;
-    _contactShare = contactShare;
-    _linkPreview = linkPreview;
-    _messageSticker = messageSticker;
-    _isViewOnceMessage = isViewOnceMessage;
+    _quotedMessage = messageBuilder.quotedMessage;
+    _contactShare = messageBuilder.contactShare;
+    _linkPreview = messageBuilder.linkPreview;
+    _messageSticker = messageBuilder.messageSticker;
+    _isViewOnceMessage = messageBuilder.isViewOnceMessage;
     _isViewOnceComplete = NO;
+
+#ifdef DEBUG
+    [self verifyPerConversationExpiration];
+#endif
 
     return self;
 }
@@ -104,13 +107,15 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
 // clang-format off
 
-- (instancetype)initWithUniqueId:(NSString *)uniqueId
+- (instancetype)initWithGrdbId:(int64_t)grdbId
+                      uniqueId:(NSString *)uniqueId
              receivedAtTimestamp:(uint64_t)receivedAtTimestamp
                           sortId:(uint64_t)sortId
                        timestamp:(uint64_t)timestamp
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -120,10 +125,11 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
                      linkPreview:(nullable OWSLinkPreview *)linkPreview
                   messageSticker:(nullable MessageSticker *)messageSticker
                    quotedMessage:(nullable TSQuotedMessage *)quotedMessage
-                   schemaVersion:(NSUInteger)schemaVersion
     storedShouldStartExpireTimer:(BOOL)storedShouldStartExpireTimer
+              wasRemotelyDeleted:(BOOL)wasRemotelyDeleted
 {
-    self = [super initWithUniqueId:uniqueId
+    self = [super initWithGrdbId:grdbId
+                        uniqueId:uniqueId
                receivedAtTimestamp:receivedAtTimestamp
                             sortId:sortId
                          timestamp:timestamp
@@ -135,6 +141,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
     _attachmentIds = attachmentIds;
     _body = body;
+    _bodyRanges = bodyRanges;
     _contactShare = contactShare;
     _expireStartedAt = expireStartedAt;
     _expiresAt = expiresAt;
@@ -144,8 +151,8 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     _linkPreview = linkPreview;
     _messageSticker = messageSticker;
     _quotedMessage = quotedMessage;
-    _schemaVersion = schemaVersion;
     _storedShouldStartExpireTimer = storedShouldStartExpireTimer;
+    _wasRemotelyDeleted = wasRemotelyDeleted;
 
     [self sdsFinalizeMessage];
 
@@ -158,7 +165,23 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
 - (void)sdsFinalizeMessage
 {
+#ifdef DEBUG
+    [self verifyPerConversationExpiration];
+#endif
+
     [self updateExpiresAt];
+}
+
+- (void)verifyPerConversationExpiration
+{
+    if (_expireStartedAt > 0 || _expiresAt > 0) {
+        // It only makes sense to set expireStartedAt and expiresAt for messages
+        // with per-conversation expiration, e.g. expiresInSeconds > 0.
+        // If either expireStartedAt and expiresAt are set, both should be set.
+        //        OWSAssertDebug(_expiresInSeconds > 0);
+        //        OWSAssertDebug(_expireStartedAt > 0);
+        //        OWSAssertDebug(_expiresAt > 0);
+    }
 }
 
 - (nullable instancetype)initWithCoder:(NSCoder *)coder
@@ -204,7 +227,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     }
 
     if (!_attachmentIds) {
-        _attachmentIds = [NSMutableArray new];
+        _attachmentIds = @[];
     }
 
     _schemaVersion = OWSMessageSchemaVersion;
@@ -251,18 +274,25 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     }
 
     _expireStartedAt = MIN(now, expireStartedAt);
+
     [self updateExpiresAt];
 }
 
-- (BOOL)shouldStartExpireTimerWithTransaction:(SDSAnyReadTransaction *)transaction
+// This method will be called after every insert and update, so it needs
+// to be cheap.
+- (BOOL)shouldStartExpireTimer
 {
+    if (self.hasPerConversationExpirationStarted) {
+        // Expiration already started.
+        return YES;
+    }
+
     return self.hasPerConversationExpiration;
 }
 
-// TODO a downloaded media doesn't start counting until download is complete.
 - (void)updateExpiresAt
 {
-    if (_expiresInSeconds > 0 && _expireStartedAt > 0) {
+    if (self.hasPerConversationExpirationStarted) {
         _expiresAt = _expireStartedAt + _expiresInSeconds * 1000;
     } else {
         _expiresAt = 0;
@@ -307,47 +337,32 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     return [NSSet setWithArray:result].allObjects;
 }
 
-- (NSArray<TSAttachment *> *)bodyAttachmentsWithTransaction:(SDSAnyReadTransaction *)transaction
+- (NSArray<TSAttachment *> *)bodyAttachmentsWithTransaction:(GRDBReadTransaction *)transaction
 {
-    return [TSMessage attachmentsWithIds:self.attachmentIds transaction:transaction];
+    // Note: attachmentIds vs. allAttachmentIds
+    return [AttachmentFinder attachmentsWithAttachmentIds:self.attachmentIds transaction:transaction];
 }
 
-- (NSArray<TSAttachment *> *)allAttachmentsWithTransaction:(SDSAnyReadTransaction *)transaction
+- (NSArray<TSAttachment *> *)allAttachmentsWithTransaction:(GRDBReadTransaction *)transaction
 {
-    return [TSMessage attachmentsWithIds:self.allAttachmentIds transaction:transaction];
+    // Note: attachmentIds vs. allAttachmentIds
+    return [AttachmentFinder attachmentsWithAttachmentIds:self.allAttachmentIds transaction:transaction];
 }
 
-+ (NSArray<TSAttachment *> *)attachmentsWithIds:(NSArray<NSString *> *)attachmentIds
-                                    transaction:(SDSAnyReadTransaction *)transaction
-{
-    NSMutableArray<TSAttachment *> *attachments = [NSMutableArray new];
-    for (NSString *attachmentId in attachmentIds) {
-        TSAttachment *_Nullable attachment = [TSAttachment anyFetchWithUniqueId:attachmentId transaction:transaction];
-        if (attachment) {
-            [attachments addObject:attachment];
-        }
-    }
-    return [attachments copy];
-}
-
-- (NSArray<TSAttachment *> *)bodyAttachmentsWithTransaction:(SDSAnyReadTransaction *)transaction
+- (NSArray<TSAttachment *> *)bodyAttachmentsWithTransaction:(GRDBReadTransaction *)transaction
                                                 contentType:(NSString *)contentType
 {
-    NSArray<TSAttachment *> *attachments = [self bodyAttachmentsWithTransaction:transaction];
-    return [attachments filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(TSAttachment *evaluatedObject,
-                                                        NSDictionary<NSString *, id> *_Nullable bindings) {
-        return [evaluatedObject.contentType isEqualToString:contentType];
-    }]];
+    return [AttachmentFinder attachmentsWithAttachmentIds:self.attachmentIds
+                                      matchingContentType:contentType
+                                              transaction:transaction];
 }
 
-- (NSArray<TSAttachment *> *)bodyAttachmentsWithTransaction:(SDSAnyReadTransaction *)transaction
+- (NSArray<TSAttachment *> *)bodyAttachmentsWithTransaction:(GRDBReadTransaction *)transaction
                                           exceptContentType:(NSString *)contentType
 {
-    NSArray<TSAttachment *> *attachments = [self bodyAttachmentsWithTransaction:transaction];
-    return [attachments filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(TSAttachment *evaluatedObject,
-                                                        NSDictionary<NSString *, id> *_Nullable bindings) {
-        return ![evaluatedObject.contentType isEqualToString:contentType];
-    }]];
+    return [AttachmentFinder attachmentsWithAttachmentIds:self.attachmentIds
+                                      ignoringContentType:contentType
+                                              transaction:transaction];
 }
 
 - (void)removeAttachment:(TSAttachment *)attachment transaction:(SDSAnyWriteTransaction *)transaction
@@ -359,7 +374,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
                                     block:^(TSMessage *message) {
                                         NSMutableArray<NSString *> *attachmentIds = [message.attachmentIds mutableCopy];
                                         [attachmentIds removeObject:attachment.uniqueId];
-                                        message.attachmentIds = attachmentIds;
+                                        message.attachmentIds = [attachmentIds copy];
                                     }];
 }
 
@@ -373,21 +388,31 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
         NSString *attachmentId = self.attachmentIds[0];
         return [NSString stringWithFormat:@"Media Message with attachmentId: %@", attachmentId];
     } else {
-        return [NSString stringWithFormat:@"%@ with body: %@", [self class], self.body];
+        return [NSString stringWithFormat:@"%@ with body: %@ has mentions: %@",
+                         [self class],
+                         self.body,
+                         self.bodyRanges.hasMentions ? @"YES" : @"NO"];
     }
 }
 
-- (nullable TSAttachment *)oversizeTextAttachmentWithTransaction:(SDSAnyReadTransaction *)transaction
+- (nullable TSAttachment *)oversizeTextAttachmentWithTransaction:(GRDBReadTransaction *)transaction
 {
     return [self bodyAttachmentsWithTransaction:transaction contentType:OWSMimeTypeOversizeTextMessage].firstObject;
 }
 
-- (NSArray<TSAttachment *> *)mediaAttachmentsWithTransaction:(SDSAnyReadTransaction *)transaction
+- (BOOL)hasMediaAttachmentsWithTransaction:(GRDBReadTransaction *)transaction
+{
+    return [AttachmentFinder existsAttachmentsWithAttachmentIds:self.attachmentIds
+                                            ignoringContentType:OWSMimeTypeOversizeTextMessage
+                                                    transaction:transaction];
+}
+
+- (NSArray<TSAttachment *> *)mediaAttachmentsWithTransaction:(GRDBReadTransaction *)transaction
 {
     return [self bodyAttachmentsWithTransaction:transaction exceptContentType:OWSMimeTypeOversizeTextMessage];
 }
 
-- (nullable NSString *)oversizeTextWithTransaction:(SDSAnyReadTransaction *)transaction
+- (nullable NSString *)oversizeTextWithTransaction:(GRDBReadTransaction *)transaction
 {
     TSAttachment *_Nullable attachment = [self oversizeTextAttachmentWithTransaction:transaction];
     if (!attachment) {
@@ -402,7 +427,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 
     NSData *_Nullable data = [NSData dataWithContentsOfFile:attachmentStream.originalFilePath];
     if (!data) {
-        OWSFailDebug(@"Can't load oversize text data.");
+        //        OWSFailDebug(@"Can't load oversize text data.");
         return nil;
     }
     NSString *_Nullable text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
@@ -410,10 +435,10 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
         OWSFailDebug(@"Can't parse oversize text data.");
         return nil;
     }
-    return text.filterStringForDisplay;
+    return text;
 }
 
-- (nullable NSString *)bodyTextWithTransaction:(SDSAnyReadTransaction *)transaction
+- (nullable NSString *)rawBodyWithTransaction:(GRDBReadTransaction *)transaction
 {
     NSString *_Nullable oversizeText = [self oversizeTextWithTransaction:transaction];
     if (oversizeText) {
@@ -421,7 +446,21 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     }
 
     if (self.body.length > 0) {
-        return self.body.filterStringForDisplay;
+        return self.body;
+    }
+
+    return nil;
+}
+
+- (nullable NSString *)plaintextBodyWithTransaction:(GRDBReadTransaction *)transaction
+{
+    NSString *_Nullable rawBody = [self rawBodyWithTransaction:transaction];
+    if (rawBody) {
+        if (self.bodyRanges) {
+            return [self.bodyRanges plaintextBodyWithText:rawBody transaction:transaction];
+        }
+
+        return rawBody.filterStringForDisplay;
     }
 
     return nil;
@@ -430,14 +469,26 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 // TODO: This method contains view-specific logic and probably belongs in NotificationsManager, not in SSK.
 - (NSString *)previewTextWithTransaction:(SDSAnyReadTransaction *)transaction
 {
+    if (self.wasRemotelyDeleted) {
+        return [self isKindOfClass:[TSIncomingMessage class]]
+            ? NSLocalizedString(@"THIS_MESSAGE_WAS_DELETED", "text indicating the message was remotely deleted")
+            : NSLocalizedString(@"YOU_DELETED_THIS_MESSAGE", "text indicating the message was remotely deleted by you");
+    }
+
     NSString *_Nullable bodyDescription = nil;
 
     if (self.body.length > 0) {
         bodyDescription = self.body;
     }
 
+    if (self.bodyRanges) {
+        bodyDescription = [self.bodyRanges plaintextBodyWithText:bodyDescription
+                                                     transaction:transaction.unwrapGrdbRead];
+    }
+
     if (bodyDescription == nil) {
-        TSAttachment *_Nullable oversizeTextAttachment = [self oversizeTextAttachmentWithTransaction:transaction];
+        TSAttachment *_Nullable oversizeTextAttachment =
+            [self oversizeTextAttachmentWithTransaction:transaction.unwrapGrdbRead];
         if ([oversizeTextAttachment isKindOfClass:[TSAttachmentStream class]]) {
             TSAttachmentStream *oversizeTextAttachmentStream = (TSAttachmentStream *)oversizeTextAttachment;
             NSData *_Nullable data = [NSData dataWithContentsOfFile:oversizeTextAttachmentStream.originalFilePath];
@@ -450,10 +501,13 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
         }
     }
 
+    NSString *_Nullable attachmentEmoji = nil;
     NSString *_Nullable attachmentDescription = nil;
 
-    TSAttachment *_Nullable mediaAttachment = [self mediaAttachmentsWithTransaction:transaction].firstObject;
+    TSAttachment *_Nullable mediaAttachment =
+        [self mediaAttachmentsWithTransaction:transaction.unwrapGrdbRead].firstObject;
     if (mediaAttachment != nil) {
+        attachmentEmoji = mediaAttachment.emoji;
         attachmentDescription = mediaAttachment.description;
     }
 
@@ -466,36 +520,39 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
                 return NSLocalizedString(@"PER_MESSAGE_EXPIRATION_NOT_VIEWABLE",
                     @"inbox cell and notification text for an already viewed view-once media message.");
             } else {
-                NSString *emoji = [TSAttachment emojiForMimeType:mediaAttachment.contentType];
-                NSString *messageDescription;
                 if (mediaAttachment.isVideo) {
-                    messageDescription = NSLocalizedString(@"PER_MESSAGE_EXPIRATION_VIDEO_PREVIEW",
+                    return NSLocalizedString(@"PER_MESSAGE_EXPIRATION_VIDEO_PREVIEW",
                         @"inbox cell and notification text for a view-once video.");
                 } else {
                     OWSAssertDebug(mediaAttachment.isImage);
-                    messageDescription = NSLocalizedString(@"PER_MESSAGE_EXPIRATION_PHOTO_PREVIEW",
+                    return NSLocalizedString(@"PER_MESSAGE_EXPIRATION_PHOTO_PREVIEW",
                         @"inbox cell and notification text for a view-once photo.");
                 }
-                return [[emoji stringByAppendingString:@" "] stringByAppendingString:messageDescription];
             }
         }
     }
 
-    if (attachmentDescription.length > 0 && bodyDescription.length > 0) {
+    if (attachmentEmoji.length > 0 && bodyDescription.length > 0) {
         // Attachment with caption.
-        return [[bodyDescription stringByAppendingString:@" "] stringByAppendingString:attachmentDescription];
+        return [[attachmentEmoji stringByAppendingString:@" "] stringByAppendingString:bodyDescription];
     } else if (bodyDescription.length > 0) {
         return bodyDescription;
     } else if (attachmentDescription.length > 0) {
         return attachmentDescription;
     } else if (self.contactShare) {
-        return [[self.contactShare.name.displayName stringByAppendingString:@" "] stringByAppendingString:@"👤"];
+        return [[@"👤" stringByAppendingString:@" "] stringByAppendingString:self.contactShare.name.displayName];
     } else if (self.messageSticker) {
-        return NSLocalizedString(
-            @"STICKER_MESSAGE_PREVIEW", @"Preview text shown in notifications and home view for sticker messages.");
+        NSString *stickerDescription = NSLocalizedString(@"STICKER_MESSAGE_PREVIEW",
+            @"Preview text shown in notifications and conversation list for sticker messages.");
+        NSString *_Nullable stickerEmoji = [StickerManager firstEmojiInEmojiString:self.messageSticker.emoji];
+        if (stickerEmoji.length > 0) {
+            return [[stickerEmoji stringByAppendingString:@" "] stringByAppendingString:stickerDescription];
+        } else {
+            return stickerDescription;
+        }
     } else {
-        // This can happen when initially saving outgoing messages with camera first capture
-        // over the homeview.
+        // This can happen when initially saving outgoing messages
+        // with camera first capture over the conversation list.
         return @"";
     }
 }
@@ -514,21 +571,70 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
         }
     }
 
-    [self updateStoredShouldStartExpireTimerWithTransaction:transaction];
+    // If we have any mentions, we need to save them to aid in querying
+    // for messages that mention a given user. We only need to save one
+    // mention record per UUID, even if the same UUID is mentioned
+    // multiple times in the message.
+    if (self.bodyRanges.hasMentions) {
+        NSSet<NSUUID *> *uniqueMentionUuids = [NSSet setWithArray:self.bodyRanges.mentions.allValues];
+        for (NSUUID *uuid in uniqueMentionUuids) {
+            TSMention *mention = [[TSMention alloc] initWithUniqueMessageId:self.uniqueId
+                                                             uniqueThreadId:self.uniqueThreadId
+                                                                 uuidString:uuid.UUIDString];
+            [mention anyInsertWithTransaction:transaction];
+        }
+    }
+
+    [self updateStoredShouldStartExpireTimer];
+
+#ifdef DEBUG
+    [self verifyPerConversationExpiration];
+#endif
+}
+
+- (void)anyDidInsertWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [super anyDidInsertWithTransaction:transaction];
+
+    [self ensurePerConversationExpirationWithTransaction:transaction];
 }
 
 - (void)anyWillUpdateWithTransaction:(SDSAnyWriteTransaction *)transaction
 {
     [super anyWillUpdateWithTransaction:transaction];
 
-    [self updateStoredShouldStartExpireTimerWithTransaction:transaction];
+    [self updateStoredShouldStartExpireTimer];
+
+#ifdef DEBUG
+    [self verifyPerConversationExpiration];
+#endif
 }
 
-- (void)updateStoredShouldStartExpireTimerWithTransaction:(SDSAnyReadTransaction *)transaction
+- (void)anyDidUpdateWithTransaction:(SDSAnyWriteTransaction *)transaction
 {
-    OWSAssertDebug(transaction);
+    [super anyDidUpdateWithTransaction:transaction];
 
-    _storedShouldStartExpireTimer = [self shouldStartExpireTimerWithTransaction:transaction];
+    [self ensurePerConversationExpirationWithTransaction:transaction];
+}
+
+- (void)ensurePerConversationExpirationWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    if (self.hasPerConversationExpirationStarted) {
+        // Expiration already started.
+        return;
+    }
+    if (![self shouldStartExpireTimer]) {
+        return;
+    }
+    uint64_t nowMs = [NSDate ows_millisecondTimeStamp];
+    [[OWSDisappearingMessagesJob sharedJob] startAnyExpirationForMessage:self
+                                                     expirationStartedAt:nowMs
+                                                             transaction:transaction];
+}
+
+- (void)updateStoredShouldStartExpireTimer
+{
+    _storedShouldStartExpireTimer = [self shouldStartExpireTimer];
 }
 
 - (void)anyWillRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
@@ -552,6 +658,15 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     [super anyDidRemoveWithTransaction:transaction];
 
     [self removeAllAttachmentsWithTransaction:transaction];
+
+    [self removeAllReactionsWithTransaction:transaction];
+
+    // This path gets hit during the YDB->GRDB migration *tests*, at which point
+    // it's unsafe to assume we have a GRDB transaction. We can safely skip this
+    // step during the tests when we don't.
+    if (!transaction.isYapWrite) {
+        [self removeAllMentionsWithTransaction:transaction];
+    }
 }
 
 - (void)removeAllAttachmentsWithTransaction:(SDSAnyWriteTransaction *)transaction
@@ -573,9 +688,19 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     };
 }
 
+- (void)removeAllMentionsWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [MentionFinder deleteAllMentionsFor:self transaction:transaction.unwrapGrdbWrite];
+}
+
 - (BOOL)hasPerConversationExpiration
 {
     return self.expiresInSeconds > 0;
+}
+
+- (BOOL)hasPerConversationExpirationStarted
+{
+    return _expireStartedAt > 0 && _expiresInSeconds > 0;
 }
 
 - (uint64_t)timestampForLegacySorting
@@ -612,6 +737,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
 - (void)updateWithExpireStartedAt:(uint64_t)expireStartedAt transaction:(SDSAnyWriteTransaction *)transaction
 {
     OWSAssertDebug(expireStartedAt > 0);
+    OWSAssertDebug(self.expiresInSeconds > 0);
 
     [self anyUpdateMessageWithTransaction:transaction
                                     block:^(TSMessage *message) {
@@ -641,7 +767,7 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
                                     }];
 }
 
-#ifdef DEBUG
+#ifdef TESTABLE_BUILD
 
 // This method is for testing purposes only.
 - (void)updateWithMessageBody:(nullable NSString *)messageBody transaction:(SDSAnyWriteTransaction *)transaction
@@ -672,6 +798,30 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     OWSAssertDebug(self.isViewOnceMessage);
     OWSAssertDebug(!self.isViewOnceComplete);
 
+    [self removeAllRenderableContentWithTransaction:transaction
+                                              block:^(TSMessage *message) {
+                                                  message.isViewOnceComplete = YES;
+                                              }];
+}
+
+#pragma mark - Remote Delete
+
+- (void)updateWithRemotelyDeletedAndRemoveRenderableContentWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    OWSAssertDebug(transaction);
+    OWSAssertDebug(!self.wasRemotelyDeleted);
+
+    [self removeAllReactionsWithTransaction:transaction];
+
+    [self removeAllRenderableContentWithTransaction:transaction
+                                              block:^(TSMessage *message) {
+                                                  message.wasRemotelyDeleted = YES;
+                                              }];
+}
+
+- (void)removeAllRenderableContentWithTransaction:(SDSAnyWriteTransaction *)transaction
+                                            block:(void (^)(TSMessage *message))block
+{
     // We call removeAllAttachmentsWithTransaction() before
     // anyUpdateWithTransaction, because anyUpdateWithTransaction's
     // block can be called twice, once on this instance and once
@@ -679,19 +829,21 @@ static const NSUInteger OWSMessageSchemaVersion = 4;
     // attachments once.
     [self anyReloadWithTransaction:transaction ignoreMissing:YES];
     [self removeAllAttachmentsWithTransaction:transaction];
+    [self removeAllMentionsWithTransaction:transaction];
 
     [self anyUpdateMessageWithTransaction:transaction
                                     block:^(TSMessage *message) {
-                                        message.isViewOnceComplete = YES;
-
                                         // Remove renderable content.
                                         message.body = nil;
+                                        message.bodyRanges = nil;
                                         message.contactShare = nil;
                                         message.quotedMessage = nil;
                                         message.linkPreview = nil;
                                         message.messageSticker = nil;
-                                        message.attachmentIds = [NSMutableArray new];
+                                        message.attachmentIds = @[];
                                         OWSAssertDebug(!message.hasRenderableContent);
+
+                                        block(message);
                                     }];
 }
 

@@ -1,49 +1,28 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class Contact;
 @class ContactsViewHelper;
+@class SDSAnyReadTransaction;
 @class SignalAccount;
 @class TSThread;
 
-@protocol CNContactViewControllerDelegate;
-
-@protocol ContactsViewHelperDelegate <NSObject>
+@protocol ContactsViewHelperObserver <NSObject>
 
 - (void)contactsViewHelperDidUpdateContacts;
-
-@optional
-
-- (BOOL)shouldHideLocalNumber;
-
-@end
-
-@protocol ContactEditingDelegate <CNContactViewControllerDelegate>
-
-- (void)didFinishEditingContact;
 
 @end
 
 #pragma mark -
 
 @class CNContact;
-@class OWSBlockingManager;
-@class OWSContactsManager;
-@class OWSProfileManager;
+@class CNContactViewController;
 @class SignalServiceAddress;
 
 @interface ContactsViewHelper : NSObject
-
-@property (nonatomic, readonly, weak) id<ContactsViewHelperDelegate> delegate;
-
-@property (nonatomic, readonly) OWSContactsManager *contactsManager;
-@property (nonatomic, readonly) OWSBlockingManager *blockingManager;
-@property (nonatomic, readonly) OWSProfileManager *profileManager;
-
-@property (nonatomic, readonly) NSArray<SignalAccount *> *signalAccounts;
 
 // Useful to differentiate between having no signal accounts vs. haven't checked yet
 @property (nonatomic, readonly) BOOL hasUpdatedContactsAtLeastOnce;
@@ -52,9 +31,10 @@ NS_ASSUME_NONNULL_BEGIN
 // previously denied contact access.
 - (void)presentMissingContactAccessAlertControllerFromViewController:(UIViewController *)viewController;
 
-- (instancetype)init NS_UNAVAILABLE;
+- (void)addObserver:(id<ContactsViewHelperObserver>)observer NS_SWIFT_NAME(addObserver(_:));
 
-- (instancetype)initWithDelegate:(id<ContactsViewHelperDelegate>)delegate;
+
+@property (nonatomic, readonly) NSArray<SignalAccount *> *allSignalAccounts;
 
 - (nullable SignalAccount *)fetchSignalAccountForAddress:(SignalServiceAddress *)address;
 - (SignalAccount *)fetchOrBuildSignalAccountForAddress:(SignalServiceAddress *)address;
@@ -67,23 +47,23 @@ NS_ASSUME_NONNULL_BEGIN
 // is only safe to be called on the main thread.
 - (BOOL)isThreadBlocked:(TSThread *)thread;
 
-// NOTE: This method uses a transaction.
 - (SignalServiceAddress *)localAddress;
 
-- (NSArray<SignalAccount *> *)signalAccountsMatchingSearchString:(NSString *)searchText;
+- (NSArray<SignalAccount *> *)signalAccountsMatchingSearchString:(NSString *)searchText
+                                                     transaction:(SDSAnyReadTransaction *)transaction;
 
 - (void)warmNonSignalContactsCacheAsync;
 - (NSArray<Contact *> *)nonSignalContactsMatchingSearchString:(NSString *)searchText;
 
-- (void)presentContactViewControllerForAddress:(SignalServiceAddress *)address
-                            fromViewController:(UIViewController<ContactEditingDelegate> *)fromViewController
-                               editImmediately:(BOOL)shouldEditImmediately;
+- (nullable CNContactViewController *)contactViewControllerForAddress:(SignalServiceAddress *)address
+                                                      editImmediately:(BOOL)shouldEditImmediately;
 
 // This method can be used to edit existing contacts.
-- (void)presentContactViewControllerForAddress:(SignalServiceAddress *)address
-                            fromViewController:(UIViewController<ContactEditingDelegate> *)fromViewController
-                               editImmediately:(BOOL)shouldEditImmediately
-                        addToExistingCnContact:(CNContact *_Nullable)cnContact;
+- (nullable CNContactViewController *)contactViewControllerForAddress:(SignalServiceAddress *)address
+                                                      editImmediately:(BOOL)shouldEditImmediately
+                                               addToExistingCnContact:(CNContact *_Nullable)existingContact
+                                                updatedNameComponents:
+                                                    (nullable NSPersonNameComponents *)updatedNameComponents;
 
 + (void)presentMissingContactAccessAlertControllerFromViewController:(UIViewController *)viewController;
 

@@ -1,14 +1,14 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "DebugUIBackup.h"
 #import "OWSBackup.h"
-#import "OWSTableViewController.h"
 #import "Signal-Swift.h"
 #import <CloudKit/CloudKit.h>
 #import <PromiseKit/AnyPromise.h>
 #import <SignalCoreKit/Randomness.h>
+#import <SignalMessaging/OWSTableViewController.h>
 
 #ifdef DEBUG
 
@@ -117,20 +117,18 @@ NS_ASSUME_NONNULL_BEGIN
     NSString *recordName = [OWSBackupAPI recordNameForTestFileWithRecipientId:recipientId];
     CKRecord *record = [OWSBackupAPI recordForFileUrl:[NSURL fileURLWithPath:filePath] recordName:recordName];
 
-    [[self.backup ensureCloudKitAccess].thenInBackground(^{
+    [self.backup ensureCloudKitAccess].thenInBackground(^{
         return [OWSBackupAPI saveRecordsToCloudObjcWithRecords:@[ record ]];
-    }) retainUntilComplete];
+    });
 }
 
 + (void)checkForBackup
 {
     OWSLogInfo(@"checkForBackup.");
 
-    [OWSBackup.sharedManager
-        checkCanImportBackup:^(BOOL value) {
-            OWSLogInfo(@"has backup available for import? %d", value);
-        }
-                     failure:^(NSError *error){
+    [OWSBackup.shared
+        checkCanImportBackup:^(BOOL value) { OWSLogInfo(@"has backup available for import? %d", value); }
+                     failure:^(NSError *error) {
                          // Do nothing.
                      }];
 }
@@ -139,39 +137,35 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSLogInfo(@"logBackupRecords.");
 
-    [OWSBackup.sharedManager logBackupRecords];
+    [OWSBackup.shared logBackupRecords];
 }
 
 + (void)logBackupManifests
 {
     OWSLogInfo(@"logBackupManifests.");
 
-    [OWSBackup.sharedManager
-        allRecipientIdsWithManifestsInCloud:^(NSArray<NSString *> *recipientIds) {
-            OWSLogInfo(@"recipientIds: %@", recipientIds);
-        }
-        failure:^(NSError *error) {
-            OWSLogError(@"error: %@", error);
-        }];
+    [OWSBackup.shared
+        allRecipientIdsWithManifestsInCloud:^(
+            NSArray<NSString *> *recipientIds) { OWSLogInfo(@"recipientIds: %@", recipientIds); }
+        failure:^(NSError *error) { OWSLogError(@"error: %@", error); }];
 }
 
 + (void)tryToImportBackup
 {
     OWSLogInfo(@"tryToImportBackup.");
 
-    UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"Restore CloudKit Backup"
-                                            message:@"This will delete all of your database contents."
-                                     preferredStyle:UIAlertControllerStyleAlert];
+    ActionSheetController *alert =
+        [[ActionSheetController alloc] initWithTitle:@"Restore CloudKit Backup"
+                                             message:@"This will delete all of your database contents."];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Restore"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *_Nonnull action) {
-                                                [OWSBackup.sharedManager tryToImportBackup];
-                                            }]];
-    [alert addAction:[OWSAlerts cancelAction]];
+    [alert addAction:[[ActionSheetAction alloc] initWithTitle:@"Restore"
+                                                        style:ActionSheetActionStyleDefault
+                                                      handler:^(ActionSheetAction *_Nonnull action) {
+                                                          [OWSBackup.shared tryToImportBackup];
+                                                      }]];
+    [alert addAction:[OWSActionSheets cancelAction]];
     UIViewController *fromViewController = [[UIApplication sharedApplication] frontmostViewController];
-    [fromViewController presentAlert:alert];
+    [fromViewController presentActionSheet:alert];
 }
 
 + (void)logDatabaseSizeStats
@@ -219,16 +213,16 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSLogInfo(@"");
 
-    [OWSBackup.sharedManager clearAllCloudKitRecords];
+    [OWSBackup.shared clearAllCloudKitRecords];
 }
 
 + (void)clearBackupMetadataCache
 {
     OWSLogInfo(@"");
 
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         [OWSBackupFragment anyRemoveAllWithInstantationWithTransaction:transaction];
-    }];
+    });
 }
 
 + (void)logBackupMetadataCache
@@ -251,9 +245,9 @@ NS_ASSUME_NONNULL_BEGIN
         CKRecord *record = [OWSBackupAPI recordForFileUrl:[NSURL fileURLWithPath:filePath] recordName:recordName];
         [records addObject:record];
     }
-    [[OWSBackupAPI saveRecordsToCloudObjcWithRecords:records].thenInBackground(^{
+    [OWSBackupAPI saveRecordsToCloudObjcWithRecords:records].thenInBackground(^{
         OWSLogVerbose(@"success.");
-    }) retainUntilComplete];
+    });
 }
 
 @end

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -42,7 +42,7 @@ import SignalMessaging
     //
     // TODO: We could make this a parameter.
     var dstSizePixels: CGSize {
-        return CGSize(width: 210, height: 210)
+        return CGSize(square: CGFloat(kOWSProfileManager_MaxAvatarDiameter))
     }
     var dstAspectRatio: CGFloat {
         return dstSizePixels.width / dstSizePixels.height
@@ -73,16 +73,11 @@ import SignalMessaging
 
     // MARK: Initializers
 
-    @available(*, unavailable, message:"use other constructor instead.")
-    required init?(coder aDecoder: NSCoder) {
-        notImplemented()
-    }
-
     @objc required init(srcImage: UIImage, successCompletion : @escaping (UIImage) -> Void) {
         // normalized() can be slightly expensive but in practice this is fine.
         self.srcImage = srcImage.normalized()
         self.successCompletion = successCompletion
-        super.init(nibName: nil, bundle: nil)
+        super.init()
 
         configureCropAndScale()
     }
@@ -99,7 +94,7 @@ import SignalMessaging
 
         srcImageSizePoints = srcImage.size
         guard
-            (srcImageSizePoints.width > 0 && srcImageSizePoints.height > 0) else {
+            srcImageSizePoints.width > 0 && srcImageSizePoints.height > 0 else {
                 return
         }
 
@@ -193,7 +188,7 @@ import SignalMessaging
         let titleLabel = UILabel()
         titleLabel.textColor = UIColor.white
         titleLabel.textAlignment = .center
-        titleLabel.font = UIFont.ows_mediumFont(withSize: ScaleFromIPhone5(16))
+        titleLabel.font = UIFont.ows_semiboldFont(withSize: ScaleFromIPhone5(16))
         titleLabel.text = NSLocalizedString("CROP_SCALE_IMAGE_VIEW_TITLE",
                                             comment: "Title for the 'crop/scale image' dialog.")
         contentView.addSubview(titleLabel)
@@ -275,7 +270,7 @@ import SignalMessaging
         // The size of the image view (should be full screen).
         let imageViewSizePoints = imageView.frame.size
         guard
-            (imageViewSizePoints.width > 0 && imageViewSizePoints.height > 0) else {
+            imageViewSizePoints.width > 0 && imageViewSizePoints.height > 0 else {
                 return
         }
         // The frame of the crop circle within the image view.
@@ -463,7 +458,7 @@ import SignalMessaging
     }
 
     private func createButton(title: String, action: Selector) -> UIButton {
-        let buttonFont = UIFont.ows_mediumFont(withSize: ScaleFromIPhone5To7Plus(18, 22))
+        let buttonFont = UIFont.ows_semiboldFont(withSize: ScaleFromIPhone5To7Plus(18, 22))
         let buttonWidth = ScaleFromIPhone5To7Plus(110, 140)
         let buttonHeight = ScaleFromIPhone5To7Plus(35, 45)
 

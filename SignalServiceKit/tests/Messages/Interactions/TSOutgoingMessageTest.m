@@ -1,113 +1,93 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSOutgoingMessage.h"
 #import "SSKBaseTestObjC.h"
 #import "TSContactThread.h"
+#import "TSOutgoingMessage.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface TSOutgoingMessageTest : SSKBaseTestObjC
 
-@property (nonatomic) TSContactThread *thread;
-
 @end
 
+#pragma mark -
+
 @implementation TSOutgoingMessageTest
-
-#ifdef BROKEN_TESTS
-
-- (NSString *)contactId
-{
-    return @"fake-thread-id";
-}
 
 - (void)setUp
 {
     [super setUp];
-    self.thread = [[TSContactThread alloc] initWithUniqueId:self.contactId];
 }
 
 - (void)testShouldNotStartExpireTimerWithMessageThatDoesNotExpire
 {
-    TSOutgoingMessage *message =
-        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:100
-                                                           inThread:self.thread
-                                                        messageBody:nil
-                                                      attachmentIds:[NSMutableArray new]
-                                                   expiresInSeconds:0
-                                                    expireStartedAt:0
-                                                     isVoiceMessage:NO
-                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
-                                                      quotedMessage:nil
-                                                       contactShare:nil
-                                                        linkPreview:nil];
-    [self readWithBlock:^(SDSAnyReadTransaction *transaction) {
-        XCTAssertFalse([message shouldStartExpireTimerWithTransaction:transaction]);
+    [self writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+        SignalServiceAddress *otherAddress = [CommonGenerator address];
+        TSContactThread *thread = [TSContactThread getOrCreateThreadWithContactAddress:otherAddress
+                                                                           transaction:transaction];
+        TSOutgoingMessageBuilder *messageBuilder = [TSOutgoingMessageBuilder outgoingMessageBuilderWithThread:thread
+                                                                                                  messageBody:nil];
+        messageBuilder.timestamp = 100;
+        TSOutgoingMessage *message = [messageBuilder build];
+
+        XCTAssertFalse([message shouldStartExpireTimer]);
     }];
 }
 
 - (void)testShouldStartExpireTimerWithSentMessage
 {
-    TSOutgoingMessage *message =
-        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:100
-                                                           inThread:self.thread
-                                                        messageBody:nil
-                                                      attachmentIds:[NSMutableArray new]
-                                                   expiresInSeconds:10
-                                                    expireStartedAt:0
-                                                     isVoiceMessage:NO
-                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
-                                                      quotedMessage:nil
-                                                       contactShare:nil
-                                                        linkPreview:nil];
     [self writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-        [message updateWithSentRecipient:self.contactId wasSentByUD:NO transaction:transaction];
-        XCTAssertTrue([message shouldStartExpireTimerWithTransaction:transaction]);
+        SignalServiceAddress *otherAddress = [[SignalServiceAddress alloc] initWithPhoneNumber:@"+12223334444"];
+        TSContactThread *thread = [TSContactThread getOrCreateThreadWithContactAddress:otherAddress
+                                                                           transaction:transaction];
+        TSOutgoingMessageBuilder *messageBuilder = [TSOutgoingMessageBuilder outgoingMessageBuilderWithThread:thread
+                                                                                                  messageBody:nil];
+        messageBuilder.timestamp = 100;
+        messageBuilder.expiresInSeconds = 10;
+        TSOutgoingMessage *message = [messageBuilder build];
+
+        [message updateWithSentRecipient:otherAddress wasSentByUD:NO transaction:transaction];
+        
+        XCTAssertTrue([message shouldStartExpireTimer]);
     }];
 }
 
 - (void)testShouldNotStartExpireTimerWithUnsentMessage
 {
-    TSOutgoingMessage *message =
-        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:100
-                                                           inThread:self.thread
-                                                        messageBody:nil
-                                                      attachmentIds:[NSMutableArray new]
-                                                   expiresInSeconds:10
-                                                    expireStartedAt:0
-                                                     isVoiceMessage:NO
-                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
-                                                      quotedMessage:nil
-                                                       contactShare:nil
-                                                        linkPreview:nil];
-    [self readWithBlock:^(SDSAnyReadTransaction *transaction) {
-        XCTAssertFalse([message shouldStartExpireTimerWithTransaction:transaction]);
+    [self writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+        SignalServiceAddress *otherAddress = [[SignalServiceAddress alloc] initWithPhoneNumber:@"+12223334444"];
+        TSContactThread *thread = [TSContactThread getOrCreateThreadWithContactAddress:otherAddress
+                                                                           transaction:transaction];
+        TSOutgoingMessageBuilder *messageBuilder = [TSOutgoingMessageBuilder outgoingMessageBuilderWithThread:thread
+                                                                                                  messageBody:nil];
+        messageBuilder.timestamp = 100;
+        messageBuilder.expiresInSeconds = 10;
+        TSOutgoingMessage *message = [messageBuilder build];
+
+        XCTAssertFalse([message shouldStartExpireTimer]);
     }];
 }
 
 - (void)testShouldNotStartExpireTimerWithAttemptingOutMessage
 {
-    TSOutgoingMessage *message =
-        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:100
-                                                           inThread:self.thread
-                                                        messageBody:nil
-                                                      attachmentIds:[NSMutableArray new]
-                                                   expiresInSeconds:10
-                                                    expireStartedAt:0
-                                                     isVoiceMessage:NO
-                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
-                                                      quotedMessage:nil
-                                                       contactShare:nil
-                                                        linkPreview:nil];
     [self writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-        [message updateWithMarkingAllUnsentRecipientsAsSendingWithTransaction:transaction];
-        XCTAssertFalse([message shouldStartExpireTimerWithTransaction:transaction]);
+        SignalServiceAddress *otherAddress = [[SignalServiceAddress alloc] initWithPhoneNumber:@"+12223334444"];
+        TSContactThread *thread = [TSContactThread getOrCreateThreadWithContactAddress:otherAddress
+                                                                           transaction:transaction];
+        TSOutgoingMessageBuilder *messageBuilder = [TSOutgoingMessageBuilder outgoingMessageBuilderWithThread:thread
+                                                                                                  messageBody:nil];
+        messageBuilder.timestamp = 100;
+        messageBuilder.expiresInSeconds = 10;
+        TSOutgoingMessage *message = [messageBuilder build];
+
+        [message updateAllUnsentRecipientsAsSendingWithTransaction:transaction];
+
+        XCTAssertFalse([message shouldStartExpireTimer]);
     }];
 }
-
-#endif
 
 @end
 

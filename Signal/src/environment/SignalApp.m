@@ -1,13 +1,11 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "SignalApp.h"
 #import "AppDelegate.h"
 #import "ConversationViewController.h"
-#import "HomeViewController.h"
 #import "Signal-Swift.h"
-#import "SignalsNavigationController.h"
 #import <SignalCoreKit/Threading.h>
 #import <SignalMessaging/DebugLogger.h>
 #import <SignalMessaging/Environment.h>
@@ -16,6 +14,17 @@
 #import <SignalServiceKit/TSGroupThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+NSString *const kNSUserDefaults_DidTerminateKey = @"kNSUserDefaults_DidTerminateKey";
+
+@interface SignalApp ()
+
+@property (nonatomic, nullable, weak) ConversationSplitViewController *conversationSplitViewController;
+@property (nonatomic) BOOL hasInitialRootViewController;
+
+@end
+
+#pragma mark -
 
 @implementation SignalApp
 
@@ -39,7 +48,45 @@ NS_ASSUME_NONNULL_BEGIN
 
     OWSSingletonAssert();
 
+    [self handleCrashDetection];
+
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{ [self warmCachesAsync]; });
+
     return self;
+}
+
+#pragma mark - Crash Detection
+
+- (void)handleCrashDetection
+{
+    NSUserDefaults *userDefaults = CurrentAppContext().appUserDefaults;
+#if TESTABLE_BUILD
+    // Ignore "crashes" in DEBUG builds; applicationWillTerminate
+    // will rarely be called during development.
+#else
+    _didLastLaunchNotTerminate = [userDefaults objectForKey:kNSUserDefaults_DidTerminateKey] != nil;
+#endif
+    // Very soon after every launch, we set this key.
+    // We clear this key when the app terminates in
+    // an orderly way.  Therefore if the key is still
+    // set on any given launch, we know that the last
+    // launch crashed.
+    //
+    // Note that iOS will sometimes kill the app for
+    // reasons other than crashing, so there will be
+    // some false positives.
+    [userDefaults setObject:@(YES) forKey:kNSUserDefaults_DidTerminateKey];
+
+    if (self.didLastLaunchNotTerminate) {
+        OWSLogWarn(@"Last launched crashed.");
+    }
+}
+
+- (void)applicationWillTerminate
+{
+    OWSLogInfo(@"");
+    NSUserDefaults *userDefaults = CurrentAppContext().appUserDefaults;
+    [userDefaults removeObjectForKey:kNSUserDefaults_DidTerminateKey];
 }
 
 #pragma mark - Dependencies
@@ -54,6 +101,18 @@ NS_ASSUME_NONNULL_BEGIN
     return SDSDatabaseStorage.shared;
 }
 
+- (TSAccountManager *)tsAccountManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
+
+    return SSKEnvironment.shared.tsAccountManager;
+}
+
+- (OWSBackup *)backup
+{
+    return AppEnvironment.shared.backup;
+}
+
 #pragma mark -
 
 - (void)setup {
@@ -61,6 +120,11 @@ NS_ASSUME_NONNULL_BEGIN
                                              selector:@selector(didChangeCallLoggingPreference:)
                                                  name:OWSPreferencesCallLoggingDidChangeNotification
                                                object:nil];
+}
+
+- (BOOL)hasSelectedThread
+{
+    return self.conversationSplitViewController.selectedThread != nil;
 }
 
 #pragma mark - View Convenience Methods
@@ -75,9 +139,9 @@ NS_ASSUME_NONNULL_BEGIN
                              animated:(BOOL)isAnimated
 {
     __block TSThread *thread = nil;
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         thread = [TSContactThread getOrCreateThreadWithContactAddress:address transaction:transaction];
-    }];
+    });
     [self presentConversationForThread:thread action:action animated:(BOOL)isAnimated];
 }
 
@@ -113,6 +177,7 @@ NS_ASSUME_NONNULL_BEGIN
                             animated:(BOOL)isAnimated
 {
     OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.conversationSplitViewController);
 
     OWSLogInfo(@"");
 
@@ -122,17 +187,22 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     DispatchMainThreadSafe(^{
-        UIViewController *frontmostVC = [[UIApplication sharedApplication] frontmostViewController];
-        
-        if ([frontmostVC isKindOfClass:[ConversationViewController class]]) {
-            ConversationViewController *conversationVC = (ConversationViewController *)frontmostVC;
-            if ([conversationVC.thread.uniqueId isEqualToString:thread.uniqueId]) {
-                [conversationVC popKeyBoard];
+        if (self.conversationSplitViewController.visibleThread) {
+            if ([self.conversationSplitViewController.visibleThread.uniqueId isEqualToString:thread.uniqueId]) {
+                ConversationViewController *conversationView
+                    = self.conversationSplitViewController.selectedConversationViewController;
+                [conversationView popKeyBoard];
+                if (action == ConversationViewActionUpdateDraft) {
+                    [conversationView reloadDraft];
+                }
                 return;
             }
         }
-        
-        [self.homeViewController presentThread:thread action:action focusMessageId:focusMessageId animated:isAnimated];
+
+        [self.conversationSplitViewController presentThread:thread
+                                                     action:action
+                                             focusMessageId:focusMessageId
+                                                   animated:isAnimated];
     });
 }
 
@@ -140,6 +210,7 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(threadId.length > 0);
+    OWSAssertDebug(self.conversationSplitViewController);
 
     OWSLogInfo(@"");
 
@@ -153,26 +224,29 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     DispatchMainThreadSafe(^{
-        UIViewController *frontmostVC = [[UIApplication sharedApplication] frontmostViewController];
+        // If there's a presented blocking splash, but the user is trying to open a thread,
+        // dismiss it. We'll try again next time they open the app. We don't want to block
+        // them from accessing their conversations.
+        [ExperienceUpgradeManager dismissSplashWithoutCompletingIfNecessary];
 
-        if ([frontmostVC isKindOfClass:[ConversationViewController class]]) {
-            ConversationViewController *conversationVC = (ConversationViewController *)frontmostVC;
-            if ([conversationVC.thread.uniqueId isEqualToString:thread.uniqueId]) {
-                [conversationVC scrollToFirstUnreadMessage:isAnimated];
+        if (self.conversationSplitViewController.visibleThread) {
+            if ([self.conversationSplitViewController.visibleThread.uniqueId isEqualToString:thread.uniqueId]) {
+                [self.conversationSplitViewController.selectedConversationViewController
+                    scrollToInitialPositionAnimated:isAnimated];
                 return;
             }
         }
 
-        [self.homeViewController presentThread:thread
-                                        action:ConversationViewActionNone
-                                focusMessageId:nil
-                                      animated:isAnimated];
+        [self.conversationSplitViewController presentThread:thread
+                                                     action:ConversationViewActionNone
+                                             focusMessageId:nil
+                                                   animated:isAnimated];
     });
 }
 
 - (void)didChangeCallLoggingPreference:(NSNotification *)notification
 {
-    [AppEnvironment.shared.callService createCallUIAdapter];
+    [AppEnvironment.shared.callService.individualCallService createCallUIAdapter];
 }
 
 #pragma mark - Methods
@@ -197,17 +271,110 @@ NS_ASSUME_NONNULL_BEGIN
     exit(0);
 }
 
-- (void)showHomeView
+- (void)showConversationSplitView
 {
-    HomeViewController *homeView = [HomeViewController new];
-    SignalsNavigationController *navigationController =
-        [[SignalsNavigationController alloc] initWithRootViewController:homeView];
-    AppDelegate *appDelegate = (AppDelegate *)[UIApplication sharedApplication].delegate;
-    appDelegate.window.rootViewController = navigationController;
-    OWSAssertDebug([navigationController.topViewController isKindOfClass:[HomeViewController class]]);
+    ConversationSplitViewController *splitViewController = [ConversationSplitViewController new];
 
-    // Clear the signUpFlowNavigationController.
-    [self setSignUpFlowNavigationController:nil];
+    AppDelegate *appDelegate = (AppDelegate *)[UIApplication sharedApplication].delegate;
+    appDelegate.window.rootViewController = splitViewController;
+
+    self.conversationSplitViewController = splitViewController;
+}
+
+- (void)showOnboardingView:(OnboardingController *)onboardingController
+{
+    OnboardingNavigationController *navController =
+        [[OnboardingNavigationController alloc] initWithOnboardingController:onboardingController];
+
+#if TESTABLE_BUILD
+    AccountManager *accountManager = AppEnvironment.shared.accountManager;
+    UITapGestureRecognizer *registerGesture =
+        [[UITapGestureRecognizer alloc] initWithTarget:accountManager action:@selector(fakeRegistration)];
+    registerGesture.numberOfTapsRequired = 8;
+    registerGesture.delaysTouchesEnded = NO;
+    [navController.view addGestureRecognizer:registerGesture];
+#else
+    UITapGestureRecognizer *submitLogGesture = [[UITapGestureRecognizer alloc] initWithTarget:[Pastelog class]
+                                                                                       action:@selector(submitLogs)];
+    submitLogGesture.numberOfTapsRequired = 8;
+    submitLogGesture.delaysTouchesEnded = NO;
+    [navController.view addGestureRecognizer:submitLogGesture];
+#endif
+
+    AppDelegate *appDelegate = (AppDelegate *)[UIApplication sharedApplication].delegate;
+    appDelegate.window.rootViewController = navController;
+
+    self.conversationSplitViewController = nil;
+}
+
+- (void)showBackupRestoreView
+{
+    BackupRestoreViewController *backupRestoreVC = [BackupRestoreViewController new];
+    OWSNavigationController *navController =
+        [[OWSNavigationController alloc] initWithRootViewController:backupRestoreVC];
+
+    AppDelegate *appDelegate = (AppDelegate *)[UIApplication sharedApplication].delegate;
+    appDelegate.window.rootViewController = navController;
+
+    self.conversationSplitViewController = nil;
+}
+
+- (void)ensureRootViewController:(NSTimeInterval)launchStartedAt
+{
+    OWSAssertIsOnMainThread();
+
+    OWSLogInfo(@"ensureRootViewController");
+
+    if (!AppReadiness.isAppReady || self.hasInitialRootViewController) {
+        return;
+    }
+    self.hasInitialRootViewController = YES;
+
+    NSTimeInterval startupDuration = CACurrentMediaTime() - launchStartedAt;
+    OWSLogInfo(@"Presenting app %.2f seconds after launch started.", startupDuration);
+
+    OnboardingController *onboarding = [OnboardingController new];
+    if (onboarding.isComplete) {
+        [onboarding markAsOnboarded];
+
+        if (self.backup.hasPendingRestoreDecision) {
+            [self showBackupRestoreView];
+        } else {
+            [self showConversationSplitView];
+        }
+    } else {
+        [self showOnboardingView:onboarding];
+    }
+
+    [AppUpdateNag.shared showAppUpgradeNagIfNecessary];
+
+    [UIViewController attemptRotationToDeviceOrientation];
+}
+
+- (BOOL)receivedVerificationCode:(NSString *)verificationCode
+{
+    UIViewController *frontmostVC = CurrentAppContext().frontmostViewController;
+    if (![frontmostVC isKindOfClass:[OnboardingVerificationViewController class]]) {
+        OWSLogWarn(@"Not the verification view controller we expected. Got %@ instead", frontmostVC.class);
+        return NO;
+    }
+
+    OnboardingVerificationViewController *verificationVC = (OnboardingVerificationViewController *)frontmostVC;
+    [verificationVC setVerificationCodeAndTryToVerify:verificationCode];
+    return YES;
+}
+
+- (void)showNewConversationView
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.conversationSplitViewController);
+
+    [self.conversationSplitViewController showNewConversationView];
+}
+
+- (nullable UIView *)snapshotSplitViewControllerAfterScreenUpdates:(BOOL)afterScreenUpdates
+{
+    return [self.conversationSplitViewController.view snapshotViewAfterScreenUpdates:afterScreenUpdates];
 }
 
 @end

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -32,7 +32,7 @@ public class ImageEditorColor: NSObject {
     }
 
     public class func defaultColor() -> ImageEditorColor {
-        return ImageEditorColor(color: UIColor(rgbHex: 0xffffff), palettePhase: 0)
+        return ImageEditorColor(color: UIColor(rgbHex: 0xff0000), palettePhase: 0)
     }
 
     public static var gradientUIColors: [UIColor] {
@@ -112,8 +112,7 @@ private class PalettePreviewView: OWSLayerView {
         //
         // The size doesn't matter since this view is
         // mostly transparent and isn't hot.
-        autoSetDimensions(to: CGSize(width: PalettePreviewView.innerRadius * 4,
-                                     height: PalettePreviewView.innerRadius * 4))
+        autoSetDimensions(to: CGSize(square: PalettePreviewView.innerRadius * 4))
     }
 
     @available(*, unavailable, message: "use other init() instead.")
@@ -163,8 +162,7 @@ private class PalettePreviewView: OWSLayerView {
         teardropLayer.path = teardropPath.cgPath
         teardropLayer.frame = bounds
 
-        let innerCircleSize = CGSize(width: innerRadius * 2,
-                                height: innerRadius * 2)
+        let innerCircleSize = CGSize(square: innerRadius * 2)
         let circleFrame = CGRect(origin: circleCenter.minus(innerCircleSize.asPoint.times(0.5)),
                                  size: innerCircleSize)
         circleLayer.path = UIBezierPath(ovalIn: circleFrame).cgPath
@@ -243,7 +241,7 @@ public class ImageEditorPaletteView: UIView {
 
         selectionView.addBorder(with: .white)
         selectionView.layer.cornerRadius = selectionSize / 2
-        selectionView.autoSetDimensions(to: CGSize(width: selectionSize, height: selectionSize))
+        selectionView.autoSetDimensions(to: CGSize(square: selectionSize))
         imageWrapper.addSubview(selectionView)
         selectionView.autoHCenterInSuperview()
 
@@ -263,7 +261,7 @@ public class ImageEditorPaletteView: UIView {
         self.previewConstraint = previewConstraint
 
         isUserInteractionEnabled = true
-        addGestureRecognizer(PaletteGestureRecognizer(target: self, action: #selector(didTouch)))
+        addGestureRecognizer(PermissiveGestureRecognizer(target: self, action: #selector(didTouch)))
 
         updateState()
     }
@@ -273,7 +271,7 @@ public class ImageEditorPaletteView: UIView {
     private let selectionSize: CGFloat = 20
 
     private func selectColor(atLocationY y: CGFloat) {
-        let palettePhase = y.inverseLerp(0, imageView.height(), shouldClamp: true)
+        let palettePhase = y.inverseLerp(0, imageView.height, shouldClamp: true)
         self.selectedValue = value(for: palettePhase)
 
         updateState()
@@ -324,7 +322,7 @@ public class ImageEditorPaletteView: UIView {
         let segmentPhase = palettePhase.inverseLerp(segment.palettePhase0, segment.palettePhase1).clamp01()
         // If CAGradientLayer doesn't do naive RGB color interpolation,
         // this won't be WYSIWYG.
-        let color = segment.color0.blend(with: segment.color1, alpha: segmentPhase)
+        let color = segment.color0.blended(with: segment.color1, alpha: segmentPhase)
         return ImageEditorColor(color: color, palettePhase: palettePhase)
     }
 
@@ -336,7 +334,7 @@ public class ImageEditorPaletteView: UIView {
             owsFailDebug("Missing selectionConstraint.")
             return
         }
-        let selectionY = imageWrapper.height() * selectedValue.palettePhase
+        let selectionY = imageWrapper.height * selectedValue.palettePhase
         selectionConstraint.constant = selectionY
 
         guard let previewConstraint = previewConstraint else {
@@ -378,83 +376,5 @@ public class ImageEditorPaletteView: UIView {
         gradientLayer.endPoint = CGPoint(x: 0, y: gradientSize.height)
         gradientLayer.endPoint = CGPoint(x: 0, y: 1.0)
         return gradientView.renderAsImage(opaque: true, scale: UIScreen.main.scale)
-    }
-}
-
-// MARK: -
-
-// The most permissive GR possible. Accepts any number of touches in any locations.
-private class PaletteGestureRecognizer: UIGestureRecognizer {
-
-    @objc
-    public override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return false
-    }
-
-    @objc
-    public override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return false
-    }
-
-    @objc
-    public override func shouldRequireFailure(of otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return false
-    }
-
-    @objc
-    public override func shouldBeRequiredToFail(by otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return false
-    }
-
-    @objc
-    public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        handle(event: event)
-    }
-
-    @objc
-    public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        handle(event: event)
-    }
-
-    @objc
-    public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        handle(event: event)
-    }
-
-    @objc
-    public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        handle(event: event)
-    }
-
-    private func handle(event: UIEvent) {
-        var hasValidTouch = false
-        if let allTouches = event.allTouches {
-            for touch in allTouches {
-                switch touch.phase {
-                case .began, .moved, .stationary:
-                    hasValidTouch = true
-                default:
-                    break
-                }
-            }
-        }
-
-        if hasValidTouch {
-            switch self.state {
-            case .possible:
-                self.state = .began
-            case .began, .changed:
-                self.state = .changed
-            default:
-                self.state = .failed
-            }
-        } else {
-            switch self.state {
-            case .began, .changed:
-                self.state = .ended
-            default:
-                self.state = .failed
-            }
-        }
     }
 }

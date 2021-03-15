@@ -1,13 +1,13 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "DomainFrontingCountryViewController.h"
 #import "OWSCountryMetadata.h"
-#import "OWSTableViewController.h"
-#import "UIColor+OWS.h"
+#import "Signal-Swift.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
+#import <SignalMessaging/OWSTableViewController.h>
 #import <SignalMessaging/Theme.h>
 #import <SignalServiceKit/OWSSignalService.h>
 
@@ -17,7 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface DomainFrontingCountryViewController ()
 
-@property (nonatomic, readonly) OWSTableViewController *tableViewController;
+@property (nonatomic, readonly) OWSTableViewController2 *tableViewController;
 
 @end
 
@@ -32,14 +32,15 @@ NS_ASSUME_NONNULL_BEGIN
     self.title = NSLocalizedString(
         @"CENSORSHIP_CIRCUMVENTION_COUNTRY_VIEW_TITLE", @"Title for the 'censorship circumvention country' view.");
 
-    self.view.backgroundColor = Theme.backgroundColor;
+    self.view.backgroundColor = Theme.tableViewBackgroundColor;
+    self.tableViewController.useThemeBackgroundColors = YES;
 
     [self createViews];
 }
 
 - (void)createViews
 {
-    _tableViewController = [OWSTableViewController new];
+    _tableViewController = [OWSTableViewController2 new];
     [self.view addSubview:self.tableViewController.view];
     [self.tableViewController.view autoPinEdgeToSuperviewSafeArea:ALEdgeLeading];
     [self.tableViewController.view autoPinEdgeToSuperviewSafeArea:ALEdgeTrailing];
@@ -55,7 +56,7 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSTableContents *contents = [OWSTableContents new];
 
-    NSString *currentCountryCode = OWSSignalService.sharedInstance.manualCensorshipCircumventionCountryCode;
+    NSString *currentCountryCode = OWSSignalService.shared.manualCensorshipCircumventionCountryCode;
 
     __weak DomainFrontingCountryViewController *weakSelf = self;
 
@@ -88,7 +89,7 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSAssertDebug(countryMetadata);
 
-    OWSSignalService.sharedInstance.manualCensorshipCircumventionCountryCode = countryMetadata.countryCode;
+    OWSSignalService.shared.manualCensorshipCircumventionCountryCode = countryMetadata.countryCode;
 
     [self.navigationController popViewControllerAnimated:YES];
 }

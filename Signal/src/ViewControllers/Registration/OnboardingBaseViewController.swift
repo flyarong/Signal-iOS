@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -15,32 +15,27 @@ public class OnboardingBaseViewController: OWSViewController {
     public init(onboardingController: OnboardingController) {
         self.onboardingController = onboardingController
 
-        super.init(nibName: nil, bundle: nil)
+        super.init()
 
         self.shouldUseTheme = false
     }
 
-    @available(*, unavailable, message: "use other init() instead.")
-    required public init?(coder aDecoder: NSCoder) {
-        notImplemented()
-    }
-
     // MARK: - Factory Methods
 
-    func titleLabel(text: String) -> UILabel {
+    func createTitleLabel(text: String) -> UILabel {
         let titleLabel = UILabel()
         titleLabel.text = text
-        titleLabel.textColor = Theme.primaryColor
-        titleLabel.font = UIFont.ows_dynamicTypeTitle1Clamped.ows_mediumWeight()
+        titleLabel.textColor = Theme.primaryTextColor
+        titleLabel.font = UIFont.ows_dynamicTypeTitle1Clamped.ows_semibold
         titleLabel.numberOfLines = 0
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.textAlignment = .center
         return titleLabel
     }
 
-    func explanationLabel(explanationText: String) -> UILabel {
+    func createExplanationLabel(explanationText: String) -> UILabel {
         let explanationLabel = UILabel()
-        explanationLabel.textColor = Theme.secondaryColor
+        explanationLabel.textColor = Theme.secondaryTextAndIconColor
         explanationLabel.font = UIFont.ows_dynamicTypeSubheadlineClamped
         explanationLabel.text = explanationText
         explanationLabel.numberOfLines = 0
@@ -49,25 +44,63 @@ public class OnboardingBaseViewController: OWSViewController {
         return explanationLabel
     }
 
-    func button(title: String, selector: Selector) -> OWSFlatButton {
-        return button(title: title, selector: selector, titleColor: .white, backgroundColor: .ows_materialBlue)
+    var primaryLayoutMargins: UIEdgeInsets {
+        switch traitCollection.horizontalSizeClass {
+        case .unspecified, .compact:
+            return UIEdgeInsets(top: 32, leading: 32, bottom: 32, trailing: 32)
+        case .regular:
+            return UIEdgeInsets(top: 112, leading: 112, bottom: 112, trailing: 112)
+        @unknown default:
+            return UIEdgeInsets(top: 32, leading: 32, bottom: 32, trailing: 32)
+        }
+    }
+
+    func primaryButton(title: String, selector: Selector) -> OWSFlatButton {
+        let button = OWSFlatButton.button(
+            title: title,
+            font: UIFont.ows_dynamicTypeBodyClamped.ows_semibold,
+            titleColor: .white,
+            backgroundColor: .ows_accentBlue,
+            target: self,
+            selector: selector)
+        button.button.layer.cornerRadius = 14
+        button.contentEdgeInsets = UIEdgeInsets(hMargin: 4, vMargin: 14)
+        return button
     }
 
     func linkButton(title: String, selector: Selector) -> OWSFlatButton {
-        return button(title: title, selector: selector, titleColor: .ows_materialBlue, backgroundColor: .white)
+        let button = OWSFlatButton.button(
+            title: title,
+            font: UIFont.ows_dynamicTypeSubheadlineClamped,
+            titleColor: Theme.accentBlueColor,
+            backgroundColor: .clear,
+            target: self,
+            selector: selector)
+        button.enableMultilineLabel()
+        button.button.layer.cornerRadius = 8
+        button.contentEdgeInsets = UIEdgeInsets(hMargin: 4, vMargin: 8)
+        return button
     }
 
-    private func button(title: String, selector: Selector, titleColor: UIColor, backgroundColor: UIColor) -> OWSFlatButton {
-        let font = UIFont.ows_dynamicTypeBodyClamped.ows_mediumWeight()
-        let buttonHeight = OWSFlatButton.heightForFont(font)
-        let button = OWSFlatButton.button(title: title,
-                                          font: font,
-                                          titleColor: titleColor,
-                                          backgroundColor: backgroundColor,
-                                          target: self,
-                                          selector: selector)
-        button.autoSetDimension(.height, toSize: buttonHeight)
-        return button
+    func shouldShowBackButton() -> Bool {
+        return onboardingController.isOnboardingModeOverriden
+    }
+
+    public class func horizontallyWrap(primaryButton: UIView) -> UIView {
+        primaryButton.autoSetDimension(.width, toSize: 280)
+
+        let buttonWrapper = UIView()
+        buttonWrapper.addSubview(primaryButton)
+
+        primaryButton.autoPinEdge(toSuperviewEdge: .top)
+        primaryButton.autoPinEdge(toSuperviewEdge: .bottom)
+        primaryButton.autoHCenterInSuperview()
+        NSLayoutConstraint.autoSetPriority(.defaultLow) {
+            primaryButton.autoPinEdge(toSuperviewEdge: .leading)
+            primaryButton.autoPinEdge(toSuperviewEdge: .trailing)
+        }
+
+        return buttonWrapper
     }
 
     // MARK: - View Lifecycle
@@ -75,7 +108,23 @@ public class OnboardingBaseViewController: OWSViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
 
-        self.shouldBottomViewReserveSpaceForKeyboard = true
+        primaryView.layoutMargins = primaryLayoutMargins
+
+        if shouldShowBackButton() {
+            let backButton = UIButton()
+            let backButtonImage = CurrentAppContext().isRTL ? #imageLiteral(resourceName: "NavBarBackRTL") : #imageLiteral(resourceName: "NavBarBack")
+            backButton.setTemplateImage(backButtonImage, tintColor: Theme.secondaryTextAndIconColor)
+            backButton.addTarget(self, action: #selector(navigateBack), for: .touchUpInside)
+
+            view.addSubview(backButton)
+            backButton.autoSetDimensions(to: CGSize(square: 40))
+            backButton.autoPinEdge(toSuperviewMargin: .leading)
+            backButton.autoPinEdge(toSuperviewMargin: .top)
+        }
+    }
+
+    @objc func navigateBack() {
+        navigationController?.popViewController(animated: true)
     }
 
     public override func viewWillAppear(_ animated: Bool) {
@@ -84,15 +133,6 @@ public class OnboardingBaseViewController: OWSViewController {
         self.navigationController?.isNavigationBarHidden = true
         // Disable "back" gesture.
         self.navigationController?.navigationItem.backBarButtonItem?.isEnabled = false
-
-        // TODO: Is there a better way to do this?
-        if let navigationController = self.navigationController as? OWSNavigationController {
-            SignalApp.shared().signUpFlowNavigationController = navigationController
-        } else {
-            owsFailDebug("Missing or invalid navigationController")
-        }
-
-        view.layoutIfNeeded()
     }
 
     public override func viewDidAppear(_ animated: Bool) {
@@ -103,13 +143,25 @@ public class OnboardingBaseViewController: OWSViewController {
         self.navigationController?.navigationItem.backBarButtonItem?.isEnabled = false
     }
 
+    // The margins for `primaryView` will update to reflect the current traitCollection.
+    // This includes handling changes to traits - e.g. when splitting an iPad or rotating
+    // some iPhones.
+    //
+    // Subclasses should add primaryView as the single child of self.view and add any further
+    // subviews to primaryView.
+    //
+    // If not for iOS10, we could get rid of primaryView, and manipulate the layoutMargins on
+    // self.view directly, however on iOS10, UIKit VC presentation machinery resets the
+    // layoutMargins *after* this method is called.
+    let primaryView = UIView()
+    override public func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        primaryView.layoutMargins = primaryLayoutMargins
+    }
+
     // MARK: - Orientation
 
     public override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        return .portrait
-    }
-
-    public override var preferredStatusBarStyle: UIStatusBarStyle {
-        return .lightContent
+        return UIDevice.current.isIPad ? .all : .portrait
     }
 }

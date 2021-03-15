@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSOutgoingSentMessageTranscript.h"
@@ -30,6 +30,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly) TSOutgoingMessage *message;
 
+@property (nonatomic, readonly) TSThread *messageThread;
+
 // sentRecipientAddress is the recipient of message, for contact thread messages.
 // It is used to identify the thread/conversation to desktop.
 @property (nonatomic, readonly, nullable) SignalServiceAddress *sentRecipientAddress;
@@ -41,6 +43,15 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark -
 
 @implementation OWSOutgoingSentMessageTranscript
+
+#pragma mark - Dependencies
+
+- (id<GroupsV2>)groupsV2
+{
+    return SSKEnvironment.shared.groupsV2;
+}
+
+#pragma mark -
 
 - (instancetype)initWithLocalThread:(TSThread *)localThread
                       messageThread:(TSThread *)messageThread
@@ -59,6 +70,7 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     _message = message;
+    _messageThread = messageThread;
     _isRecipientUpdate = isRecipientUpdate;
 
     if ([messageThread isKindOfClass:[TSContactThread class]]) {
@@ -98,11 +110,49 @@ NS_ASSUME_NONNULL_BEGIN
         // Create data message without renderable content.
         SSKProtoDataMessageBuilder *dataBuilder = [SSKProtoDataMessage builder];
         [dataBuilder setTimestamp:self.message.timestamp];
-
-        OWSAssertDebug(SSKFeatureFlags.viewOnceSending);
+        [dataBuilder setExpireTimer:self.message.expiresInSeconds];
         [dataBuilder setIsViewOnce:YES];
         [dataBuilder setRequiredProtocolVersion:(uint32_t)SSKProtoDataMessageProtocolVersionViewOnceVideo];
 
+        if (self.messageThread.isGroupThread) {
+            TSGroupThread *groupThread = (TSGroupThread *)self.messageThread;
+
+            switch (groupThread.groupModel.groupsVersion) {
+                case GroupsVersionV1: {
+                    SSKProtoGroupContextBuilder *groupBuilder =
+                        [SSKProtoGroupContext builderWithId:groupThread.groupModel.groupId];
+                    [groupBuilder setType:SSKProtoGroupContextTypeDeliver];
+                    NSError *error;
+                    SSKProtoGroupContext *_Nullable groupContextProto = [groupBuilder buildAndReturnError:&error];
+                    if (error || !groupContextProto) {
+                        OWSFailDebug(@"could not build protobuf: %@.", error);
+                        return nil;
+                    }
+                    [dataBuilder setGroup:groupContextProto];
+                    break;
+                }
+                case GroupsVersionV2: {
+                    if (![groupThread.groupModel isKindOfClass:[TSGroupModelV2 class]]) {
+                        OWSFailDebug(@"Invalid group model.");
+                        return nil;
+                    }
+                    TSGroupModelV2 *groupModel = (TSGroupModelV2 *)groupThread.groupModel;
+
+                    NSError *error;
+                    SSKProtoGroupContextV2 *_Nullable groupContextV2 =
+                        [self.groupsV2 buildGroupContextV2ProtoWithGroupModel:groupModel
+                                                       changeActionsProtoData:nil
+                                                                        error:&error];
+                    if (groupContextV2 == nil || error != nil) {
+                        OWSFailDebug(@"Error: %@", error);
+                        return nil;
+                    }
+                    [dataBuilder setGroupV2:groupContextV2];
+                    break;
+                }
+            }
+        }
+        
         NSError *error;
         dataMessage = [dataBuilder buildAndReturnError:&error];
         if (error || !dataMessage) {
@@ -110,11 +160,8 @@ NS_ASSUME_NONNULL_BEGIN
             return nil;
         }
     } else {
-        // TODO we could hang messageThread on `self` like we do with `self.message`
-        // to avoid this fetch.
-        TSThread *messageThread = [self.message threadWithTransaction:transaction];
         dataMessage = [self.message buildDataMessage:self.sentRecipientAddress
-                                              thread:messageThread
+                                              thread:self.messageThread
                                          transaction:transaction];
     }
 

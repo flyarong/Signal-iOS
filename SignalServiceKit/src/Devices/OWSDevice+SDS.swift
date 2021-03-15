@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -12,6 +12,8 @@ import SignalCoreKit
 // MARK: - Record
 
 public struct DeviceRecord: SDSRecord {
+    public weak var delegate: SDSRecordDelegate?
+
     public var tableMetadata: SDSTableMetadata {
         return OWSDeviceSerializer.table
     }
@@ -25,7 +27,7 @@ public struct DeviceRecord: SDSRecord {
     public let recordType: SDSRecordType
     public let uniqueId: String
 
-    // Base class properties
+    // Properties
     public let createdAt: Double
     public let deviceId: Int
     public let lastSeenAt: Double
@@ -43,6 +45,14 @@ public struct DeviceRecord: SDSRecord {
 
     public static func columnName(_ column: DeviceRecord.CodingKeys, fullyQualified: Bool = false) -> String {
         return fullyQualified ? "\(databaseTableName).\(column.rawValue)" : column.rawValue
+    }
+
+    public func didInsert(with rowID: Int64, for column: String?) {
+        guard let delegate = delegate else {
+            owsFailDebug("Missing delegate.")
+            return
+        }
+        delegate.updateRowId(rowID)
     }
 }
 
@@ -99,7 +109,8 @@ extension OWSDevice {
             let lastSeenAt: Date = SDSDeserialization.requiredDoubleAsDate(lastSeenAtInterval, name: "lastSeenAt")
             let name: String? = record.name
 
-            return OWSDevice(uniqueId: uniqueId,
+            return OWSDevice(grdbId: recordId,
+                             uniqueId: uniqueId,
                              createdAt: createdAt,
                              deviceId: deviceId,
                              lastSeenAt: lastSeenAt,
@@ -138,20 +149,52 @@ extension OWSDevice: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSDevice: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSDevice.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let createdAt: Date = modelToCopy.createdAt
+            let deviceId: Int = modelToCopy.deviceId
+            let lastSeenAt: Date = modelToCopy.lastSeenAt
+            let name: String? = modelToCopy.name
+
+            return OWSDevice(grdbId: id,
+                             uniqueId: uniqueId,
+                             createdAt: createdAt,
+                             deviceId: deviceId,
+                             lastSeenAt: lastSeenAt,
+                             name: name)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSDeviceSerializer {
 
     // This defines all of the columns used in the table
     // where this model (and any subclasses) are persisted.
-    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey, columnIndex: 0)
-    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64, columnIndex: 1)
-    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true, columnIndex: 2)
-    // Base class properties
-    static let createdAtColumn = SDSColumnMetadata(columnName: "createdAt", columnType: .double, columnIndex: 3)
-    static let deviceIdColumn = SDSColumnMetadata(columnName: "deviceId", columnType: .int64, columnIndex: 4)
-    static let lastSeenAtColumn = SDSColumnMetadata(columnName: "lastSeenAt", columnType: .double, columnIndex: 5)
-    static let nameColumn = SDSColumnMetadata(columnName: "name", columnType: .unicodeString, isOptional: true, columnIndex: 6)
+    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey)
+    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64)
+    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true)
+    // Properties
+    static let createdAtColumn = SDSColumnMetadata(columnName: "createdAt", columnType: .double)
+    static let deviceIdColumn = SDSColumnMetadata(columnName: "deviceId", columnType: .int64)
+    static let lastSeenAtColumn = SDSColumnMetadata(columnName: "lastSeenAt", columnType: .double)
+    static let nameColumn = SDSColumnMetadata(columnName: "name", columnType: .unicodeString, isOptional: true)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -176,14 +219,14 @@ public extension OWSDevice {
         sdsSave(saveMode: .insert, transaction: transaction)
     }
 
-    // This method is private; we should never use it directly.
-    // Instead, use anyUpdate(transaction:block:), so that we
-    // use the "update with" pattern.
-    private func anyUpdate(transaction: SDSAnyWriteTransaction) {
-        sdsSave(saveMode: .update, transaction: transaction)
-    }
-
-    @available(*, deprecated, message: "Use anyInsert() or anyUpdate() instead.")
+    // Avoid this method whenever feasible.
+    //
+    // If the record has previously been saved, this method does an overwriting
+    // update of the corresponding row, otherwise if it's a new record, this
+    // method inserts a new row.
+    //
+    // For performance, when possible, you should explicitly specify whether
+    // you are inserting or updating rather than calling this method.
     func anyUpsert(transaction: SDSAnyWriteTransaction) {
         let isInserting: Bool
         if OWSDevice.anyFetch(uniqueId: uniqueId, transaction: transaction) != nil {
@@ -234,7 +277,20 @@ public extension OWSDevice {
             block(dbCopy)
         }
 
-        dbCopy.anyUpdate(transaction: transaction)
+        dbCopy.sdsSave(saveMode: .update, transaction: transaction)
+    }
+
+    // This method is an alternative to `anyUpdate(transaction:block:)` methods.
+    //
+    // We should generally use `anyUpdate` to ensure we're not unintentionally
+    // clobbering other columns in the database when another concurrent update
+    // has occured.
+    //
+    // There are cases when this doesn't make sense, e.g. when  we know we've
+    // just loaded the model in the same transaction. In those cases it is
+    // safe and faster to do a "overwriting" update
+    func anyOverwritingUpdate(transaction: SDSAnyWriteTransaction) {
+        sdsSave(saveMode: .update, transaction: transaction)
     }
 
     func anyRemove(transaction: SDSAnyWriteTransaction) {
@@ -261,9 +317,11 @@ public extension OWSDevice {
 
 @objc
 public class OWSDeviceCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<DeviceRecord>?
 
-    init(cursor: RecordCursor<DeviceRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<DeviceRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -305,10 +363,10 @@ public extension OWSDevice {
         let database = transaction.database
         do {
             let cursor = try DeviceRecord.fetchCursor(database)
-            return OWSDeviceCursor(cursor: cursor)
+            return OWSDeviceCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSDeviceCursor(cursor: nil)
+            return OWSDeviceCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -514,11 +572,11 @@ public extension OWSDevice {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try DeviceRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSDeviceCursor(cursor: cursor)
+            return OWSDeviceCursor(transaction: transaction, cursor: cursor)
         } catch {
             Logger.error("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSDeviceCursor(cursor: nil)
+            return OWSDeviceCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -555,17 +613,34 @@ class OWSDeviceSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .device
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
+        // Properties
         let createdAt: Double = archiveDate(model.createdAt)
         let deviceId: Int = model.deviceId
         let lastSeenAt: Double = archiveDate(model.lastSeenAt)
         let name: String? = model.name
 
-        return DeviceRecord(id: id, recordType: recordType, uniqueId: uniqueId, createdAt: createdAt, deviceId: deviceId, lastSeenAt: lastSeenAt, name: name)
+        return DeviceRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, createdAt: createdAt, deviceId: deviceId, lastSeenAt: lastSeenAt, name: name)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSDevice {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSDevice {
+        guard let record = try asRecord() as? DeviceRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSDevice.fromRecord(record)
+    }
+}
+#endif

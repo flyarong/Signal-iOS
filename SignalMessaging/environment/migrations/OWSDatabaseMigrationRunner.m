@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDatabaseMigrationRunner.h"
@@ -46,10 +46,11 @@ NS_ASSUME_NONNULL_BEGIN
         [[OWS112TypingIndicatorsMigration alloc] init],
         [[OWS113MultiAttachmentMediaMessages alloc] init],
         [[OWS114RemoveDynamicInteractions alloc] init],
-        [OWS115EnsureProfileAvatars new]
+        [OWS115EnsureProfileAvatars new],
+        [OWS116UpdatePrekeys new]
     ];
 
-    if (SSKFeatureFlags.storageMode != StorageModeYdb) {
+    if (StorageCoordinator.dataStoreForUI == DataStoreGrdb) {
         return [prodMigrations arrayByAddingObjectsFromArray:@ [[OWS1XXGRDBMigration new]]];
     } else {
         return prodMigrations;
@@ -58,13 +59,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)assumeAllExistingMigrationsRun
 {
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         for (OWSDatabaseMigration *migration in self.allMigrations) {
             OWSLogInfo(@"Skipping migration on new install: %@", migration);
 
             [migration markAsCompleteWithTransaction:transaction];
         }
-    }];
+    });
 }
 
 - (void)runAllOutstandingWithCompletion:(OWSDatabaseMigrationCompletion)completion
@@ -85,7 +86,7 @@ NS_ASSUME_NONNULL_BEGIN
         [knownMigrationIds addObject:migration.migrationId];
     }
 
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         NSArray<NSString *> *savedMigrationIds =
             [OWSDatabaseMigration allCompleteMigrationIdsWithTransaction:transaction];
 
@@ -97,7 +98,7 @@ NS_ASSUME_NONNULL_BEGIN
             OWSLogInfo(@"Culling unknown migration: %@", unknownMigrationId);
             [OWSDatabaseMigration markMigrationIdAsIncomplete:unknownMigrationId transaction:transaction];
         }
-    }];
+    });
 }
 
 // Run migrations serially to:

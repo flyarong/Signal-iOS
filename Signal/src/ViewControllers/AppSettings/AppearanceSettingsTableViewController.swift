@@ -1,31 +1,52 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 @objc
-class AppearanceSettingsTableViewController: OWSTableViewController {
+class AppearanceSettingsTableViewController: OWSTableViewController2 {
     override func viewDidLoad() {
         super.viewDidLoad()
 
         title = NSLocalizedString("SETTINGS_APPEARANCE_TITLE", comment: "The title for the appearance settings.")
 
         updateTableContents()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(updateTableContents),
+            name: .ThemeDidChange,
+            object: nil
+        )
     }
 
+    @objc
     func updateTableContents() {
         let contents = OWSTableContents()
 
-        let themeSection = OWSTableSection()
-        themeSection.headerTitle = NSLocalizedString("SETTINGS_APPEARANCE_THEME_TITLE",
-                                                     comment: "The title for the theme section in the appearance settings.")
+        let firstSection = OWSTableSection()
+        firstSection.add(OWSTableItem.disclosureItem(
+            withText: NSLocalizedString("SETTINGS_APPEARANCE_THEME_TITLE",
+                                        comment: "The title for the theme section in the appearance settings."),
+            detailText: ThemeSettingsTableViewController.currentThemeName,
+            accessibilityIdentifier: UIView.accessibilityIdentifier(in: self, name: "theme")
+        ) { [weak self] in
+            guard let self = self else { return }
+            let vc = ThemeSettingsTableViewController()
+            self.navigationController?.pushViewController(vc, animated: true)
+        })
+        firstSection.add(OWSTableItem.disclosureItem(
+            withText: NSLocalizedString("SETTINGS_ITEM_WALLPAPER",
+                                        comment: "Label for settings view that allows user to change the wallpaper."),
+            accessibilityIdentifier: UIView.accessibilityIdentifier(in: self, name: "wallpaper")
+        ) { [weak self] in
+            guard let self = self else { return }
+            let vc = WallpaperSettingsViewController()
+            self.navigationController?.pushViewController(vc, animated: true)
+        })
 
-        themeSection.add(appearanceItem(.system))
-        themeSection.add(appearanceItem(.light))
-        themeSection.add(appearanceItem(.dark))
-
-        contents.addSection(themeSection)
+        contents.addSection(firstSection)
 
         // TODO iOS 13 – maybe expose the preferred language settings here to match android
         // It not longer seems to exist in iOS 13.1 so not sure if Apple got rid of it

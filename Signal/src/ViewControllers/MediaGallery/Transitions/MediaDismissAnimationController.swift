@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 
 class MediaDismissAnimationController: NSObject {
-    private let galleryItem: MediaGalleryItem
+    private let item: Media
     public let interactionController: MediaInteractiveDismiss?
 
     var transitionView: UIView?
@@ -14,7 +14,12 @@ class MediaDismissAnimationController: NSObject {
     var pendingCompletion: (() -> Promise<Void>)?
 
     init(galleryItem: MediaGalleryItem, interactionController: MediaInteractiveDismiss? = nil) {
-        self.galleryItem = galleryItem
+        self.item = .gallery(galleryItem)
+        self.interactionController = interactionController
+    }
+
+    init(image: UIImage, interactionController: MediaInteractiveDismiss? = nil) {
+        self.item = .image(image)
         self.interactionController = interactionController
     }
 }
@@ -50,7 +55,7 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
             return
         }
 
-        guard let fromMediaContext = fromContextProvider.mediaPresentationContext(galleryItem: galleryItem, in: containerView) else {
+        guard let fromMediaContext = fromContextProvider.mediaPresentationContext(item: item, in: containerView) else {
             owsFailDebug("fromPresentationContext was unexpectedly nil")
             transitionContext.completeTransition(false)
             return
@@ -82,6 +87,14 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
         case let navController as UINavigationController:
             guard let contextProvider = navController.topViewController as? MediaPresentationContextProvider else {
                 owsFailDebug("unexpected context: \(String(describing: navController.topViewController))")
+                transitionContext.completeTransition(false)
+                return
+            }
+            toContextProvider = contextProvider
+        case let splitViewController as ConversationSplitViewController:
+            guard let contextProvider = splitViewController.topViewController as? MediaPresentationContextProvider else {
+                owsFailDebug("unexpected context: \(String(describing: splitViewController.topViewController))")
+                transitionContext.completeTransition(false)
                 return
             }
             toContextProvider = contextProvider
@@ -91,9 +104,9 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
             return
         }
 
-        let toMediaContext = toContextProvider.mediaPresentationContext(galleryItem: galleryItem, in: containerView)
+        let toMediaContext = toContextProvider.mediaPresentationContext(item: item, in: containerView)
 
-        guard let presentationImage = galleryItem.attachmentStream.originalImage else {
+        guard let presentationImage = item.image else {
             owsFailDebug("presentationImage was unexpectedly nil")
             // Complete transition immediately.
             fromContextProvider.mediaWillPresent(fromContext: fromMediaContext)
@@ -125,7 +138,6 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
             containerView.addSubview(overlayView)
             overlayView.frame = overlayViewFrame
         } else {
-            owsFailDebug("expected overlay while dismissing media view")
             fromTransitionalOverlayView = nil
         }
 
@@ -152,7 +164,7 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
                 // `toMediaContext` can be nil if the target item is scrolled off of the
                 // contextProvider's screen, so we synthesize a context to dismiss the item
                 // off screen
-                 let offscreenFrame = fromMediaContext.presentationFrame.offsetBy(dx: 0, dy: UIScreen.main.bounds.height)
+                let offscreenFrame = fromMediaContext.presentationFrame.offsetBy(dx: 0, dy: fromMediaContext.presentationFrame.height)
                 destinationFrame = offscreenFrame
                 destinationCornerRadius = fromMediaContext.cornerRadius
             }
@@ -184,29 +196,6 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
                 if let toMediaContext = toMediaContext {
                     toContextProvider.mediaDidDismiss(toContext: toMediaContext)
                 }
-            }.done {
-                // HACK: First Responder Juggling
-                //
-                // First responder status is relinquished to the toVC upon the
-                // *start* of the dismissal. This is surprisng for two reasons:
-                // 1. I'd expect the input toolbar to be dismissed interactively, since we're in
-                //    an interactive transition.
-                // 2. I'd expect cancelling the transition to restore first responder to the
-                //    fromVC.
-                //
-                // Scenario 1: Cancelled dismissal causes CVC input toolbar over the media view.
-                //
-                // Scenario 2: Cancelling dismissal, followed by an actual dismissal to CVC,
-                // results in a non-visible input toolbar.
-                //
-                // A known bug with this approach is that the *first* time you start to dismiss
-                // you'll see the input toolbar enter the screen. It will dismiss itself if you
-                // cancel the transition.
-                let firstResponderVC = transitionContext.transitionWasCancelled ? fromVC : toVC
-                if !firstResponderVC.isFirstResponder {
-                    Logger.verbose("regaining first responder")
-                    firstResponderVC.becomeFirstResponder()
-                }
             }
         }
 
@@ -214,7 +203,7 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
             self.pendingCompletion = completion
         } else {
             Logger.verbose("ran completion simultaneously for non-interactive transition")
-            completion().retainUntilComplete()
+            completion()
         }
 
         fromContextProvider.mediaWillDismiss(fromContext: fromMediaContext)
@@ -236,12 +225,15 @@ extension MediaDismissAnimationController: UIViewControllerAnimatedTransitioning
             Logger.verbose("ran pendingCompletion after fadeout")
             self.pendingCompletion = nil
             return pendingCompletion()
-        }.retainUntilComplete()
+        }
     }
 }
 
 extension MediaDismissAnimationController: InteractiveDismissDelegate {
-    func interactiveDismiss(_ interactiveDismiss: MediaInteractiveDismiss, didChangeTouchOffset offset: CGPoint) {
+    func interactiveDismissDidBegin(_ interactiveDismiss: UIPercentDrivenInteractiveTransition) {
+    }
+
+    func interactiveDismissUpdate(_ interactiveDismiss: UIPercentDrivenInteractiveTransition, didChangeTouchOffset offset: CGPoint) {
         guard let transitionView = transitionView else {
             // transition hasn't started yet.
             return
@@ -255,11 +247,14 @@ extension MediaDismissAnimationController: InteractiveDismissDelegate {
         transitionView.center = fromMediaFrame.offsetBy(dx: offset.x, dy: offset.y).center
     }
 
-    func interactiveDismissDidFinish(_ interactiveDismiss: MediaInteractiveDismiss) {
+    func interactiveDismissDidFinish(_ interactiveDismiss: UIPercentDrivenInteractiveTransition) {
         if let pendingCompletion = pendingCompletion {
             Logger.verbose("interactive gesture started pendingCompletion during fadeout")
             self.pendingCompletion = nil
-            pendingCompletion().retainUntilComplete()
+            _ = pendingCompletion()
         }
+    }
+
+    func interactiveDismissDidCancel(_ interactiveDismiss: UIPercentDrivenInteractiveTransition) {
     }
 }

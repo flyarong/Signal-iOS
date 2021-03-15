@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,7 +8,7 @@ import PromiseKit
 #if TESTABLE_BUILD
 
 @objc
-public class OWSMockSyncManager: NSObject, OWSSyncManagerProtocol {
+public class OWSMockSyncManager: NSObject, SyncManagerProtocol {
     public typealias MockBlock = () -> Void
 
     @objc
@@ -16,6 +16,68 @@ public class OWSMockSyncManager: NSObject, OWSSyncManagerProtocol {
 
     @objc
     public func sendConfigurationSyncMessage() {
+        Logger.info("")
+    }
+
+    @objc
+    public func sendAllSyncRequestMessages() -> AnyPromise {
+        Logger.info("")
+
+        return AnyPromise(Promise.value(()))
+    }
+
+    @objc
+    public func sendAllSyncRequestMessages(timeout: TimeInterval) -> AnyPromise {
+        Logger.info("")
+
+        return AnyPromise(Promise.value(()))
+    }
+
+    public func sendFetchLatestProfileSyncMessage() {
+        Logger.info("")
+    }
+
+    public func sendFetchLatestStorageManifestSyncMessage() {
+        Logger.info("")
+    }
+
+    public func sendKeysSyncMessage() {
+        Logger.info("")
+    }
+
+    public func processIncomingConfigurationSyncMessage(_ syncMessage: SSKProtoSyncMessageConfiguration, transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func processIncomingFetchLatestSyncMessage(_ syncMessage: SSKProtoSyncMessageFetchLatest, transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func processIncomingContactsSyncMessage(_ syncMessage: SSKProtoSyncMessageContacts, transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func processIncomingGroupsSyncMessage(_ syncMessage: SSKProtoSyncMessageGroups, transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func processIncomingKeysSyncMessage(_ syncMessage: SSKProtoSyncMessageKeys, transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func sendKeysSyncRequestMessage(transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func processIncomingMessageRequestResponseSyncMessage(_ syncMessage: SSKProtoSyncMessageMessageRequestResponse, transaction: SDSAnyWriteTransaction) {
+        Logger.info("")
+    }
+
+    public func sendMessageRequestResponseSyncMessage(thread: TSThread, responseType: OWSSyncMessageRequestResponseType) {
+        Logger.info("")
+    }
+
+    public func sendMessageRequestResponseSyncMessage(thread: TSThread, responseType: OWSSyncMessageRequestResponseType, transaction: SDSAnyWriteTransaction) {
         Logger.info("")
     }
 
@@ -34,14 +96,14 @@ public class OWSMockSyncManager: NSObject, OWSSyncManagerProtocol {
     }
 
     @objc
-    public func syncContacts(for signalAccounts: [SignalAccount]) -> AnyPromise {
+    public func syncContacts(forSignalAccounts signalAccounts: [SignalAccount]) -> AnyPromise {
         Logger.info("")
 
         return AnyPromise()
     }
 
     @objc
-    public func syncGroups(with transaction: SDSAnyWriteTransaction) {
+    public func syncGroups(transaction: SDSAnyWriteTransaction) {
         Logger.info("")
 
         syncGroupsHook?()

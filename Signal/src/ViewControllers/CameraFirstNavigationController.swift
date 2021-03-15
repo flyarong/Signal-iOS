@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -17,19 +17,9 @@ public class CameraFirstCaptureSendFlow: NSObject {
     public weak var delegate: CameraFirstCaptureDelegate?
 
     var approvedAttachments: [SignalAttachment]?
-    var approvalMessageText: String?
+    var approvalMessageBody: MessageBody?
 
     var selectedConversations: [ConversationItem] = []
-
-    // MARK: Dependencies
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SSKEnvironment.shared.databaseStorage
-    }
-
-    var broadcastMediaMessageJobQueue: BroadcastMediaMessageJobQueue {
-        return AppEnvironment.shared.broadcastMediaMessageJobQueue
-    }
 }
 
 extension CameraFirstCaptureSendFlow: SendMediaNavDelegate {
@@ -37,21 +27,21 @@ extension CameraFirstCaptureSendFlow: SendMediaNavDelegate {
         delegate?.cameraFirstCaptureSendFlowDidCancel(self)
     }
 
-    func sendMediaNav(_ sendMediaNavigationController: SendMediaNavigationController, didApproveAttachments attachments: [SignalAttachment], messageText: String?) {
+    func sendMediaNav(_ sendMediaNavigationController: SendMediaNavigationController, didApproveAttachments attachments: [SignalAttachment], messageBody: MessageBody?) {
         self.approvedAttachments = attachments
-        self.approvalMessageText = messageText
+        self.approvalMessageBody = messageBody
 
         let pickerVC = ConversationPickerViewController()
         pickerVC.delegate = self
         sendMediaNavigationController.pushViewController(pickerVC, animated: true)
     }
 
-    func sendMediaNavInitialMessageText(_ sendMediaNavigationController: SendMediaNavigationController) -> String? {
-        return approvalMessageText
+    func sendMediaNavInitialMessageBody(_ sendMediaNavigationController: SendMediaNavigationController) -> MessageBody? {
+        return approvalMessageBody
     }
 
-    func sendMediaNav(_ sendMediaNavigationController: SendMediaNavigationController, didChangeMessageText newMessageText: String?) {
-        self.approvalMessageText = newMessageText
+    func sendMediaNav(_ sendMediaNavigationController: SendMediaNavigationController, didChangeMessageBody newMessageBody: MessageBody?) {
+        self.approvalMessageBody = newMessageBody
     }
 
     var sendMediaNavApprovalButtonImageName: String {
@@ -61,26 +51,44 @@ extension CameraFirstCaptureSendFlow: SendMediaNavDelegate {
     var sendMediaNavCanSaveAttachments: Bool {
         return true
     }
+
+    var sendMediaNavTextInputContextIdentifier: String? {
+        return nil
+    }
+
+    var sendMediaNavRecipientNames: [String] {
+        return selectedConversations.map { $0.title }
+    }
+
+    var sendMediaNavMentionableAddresses: [SignalServiceAddress] {
+        guard selectedConversations.count == 1,
+              case .group(let groupThreadId) = selectedConversations.first?.messageRecipient,
+              let groupThread = SDSDatabaseStorage.shared.uiRead(block: { transaction in
+                return TSGroupThread.anyFetchGroupThread(uniqueId: groupThreadId, transaction: transaction)
+              }),
+              Mention.threadAllowsMentionSend(groupThread) else { return [] }
+        return groupThread.recipientAddresses
+    }
 }
 
 extension CameraFirstCaptureSendFlow: ConversationPickerDelegate {
-    var selectedConversationsForConversationPicker: [ConversationItem] {
+    public var selectedConversationsForConversationPicker: [ConversationItem] {
         return selectedConversations
     }
 
-    func conversationPicker(_ conversationPickerViewController: ConversationPickerViewController,
+    public func conversationPicker(_ conversationPickerViewController: ConversationPickerViewController,
                             didSelectConversation conversation: ConversationItem) {
         self.selectedConversations.append(conversation)
     }
 
-    func conversationPicker(_ conversationPickerViewController: ConversationPickerViewController,
+    public func conversationPicker(_ conversationPickerViewController: ConversationPickerViewController,
                             didDeselectConversation conversation: ConversationItem) {
         self.selectedConversations = self.selectedConversations.filter {
             $0.messageRecipient != conversation.messageRecipient
         }
     }
 
-    func conversationPickerDidCompleteSelection(_ conversationPickerViewController: ConversationPickerViewController) {
+    public func conversationPickerDidCompleteSelection(_ conversationPickerViewController: ConversationPickerViewController) {
         guard let approvedAttachments = self.approvedAttachments else {
             owsFailDebug("approvedAttachments was unexpectedly nil")
             delegate?.cameraFirstCaptureSendFlowDidCancel(self)
@@ -88,64 +96,26 @@ extension CameraFirstCaptureSendFlow: ConversationPickerDelegate {
         }
 
         let conversations = selectedConversationsForConversationPicker
-        DispatchQueue.global().async(.promise) {
-            // Duplicate attachments per conversation
-            let conversationAttachments: [(ConversationItem, [SignalAttachment])] =
-                try conversations.map { conversation in
-                    return (conversation, try approvedAttachments.map { try $0.cloneAttachment() })
-                }
-
-            // We only upload one set of attachments, and then copy the upload details into
-            // each conversation before sending.
-            let attachmentsToUpload: [OutgoingAttachmentInfo] = approvedAttachments.map { attachment in
-                return OutgoingAttachmentInfo(dataSource: attachment.dataSource,
-                                              contentType: attachment.mimeType,
-                                              sourceFilename: attachment.filenameOrDefault,
-                                              caption: attachment.captionText,
-                                              albumMessageId: nil)
-            }
-
-            self.databaseStorage.write { transaction in
-                var messages: [TSOutgoingMessage] = []
-
-                for (conversation, attachments) in conversationAttachments {
-                    let thread: TSThread
-                    switch conversation.messageRecipient {
-                    case .contact(let address):
-                        thread = TSContactThread.getOrCreateThread(withContactAddress: address,
-                                                                   transaction: transaction)
-                    case .group(let groupThread):
-                        thread = groupThread
-                    }
-
-                    let message = try! ThreadUtil.createUnsentMessage(withText: self.approvalMessageText,
-                                                                      mediaAttachments: attachments,
-                                                                      in: thread,
-                                                                      quotedReplyModel: nil,
-                                                                      linkPreviewDraft: nil,
-                                                                      transaction: transaction)
-                    messages.append(message)
-                }
-
-                // map of attachments we'll upload to their copies in each recipient thread
-                var attachmentIdMap: [String: [String]] = [:]
-                let correspondingAttachmentIds = transpose(messages.map { $0.attachmentIds })
-                for (index, attachmentInfo) in attachmentsToUpload.enumerated() {
-                    do {
-                        let attachmentToUpload = try attachmentInfo.asStreamConsumingDataSource(withIsVoiceMessage: false)
-                        attachmentToUpload.anyInsert(transaction: transaction)
-
-                        attachmentIdMap[attachmentToUpload.uniqueId] = correspondingAttachmentIds[index]
-                    } catch {
-                        owsFailDebug("error: \(error)")
-                    }
-                }
-
-                self.broadcastMediaMessageJobQueue.add(attachmentIdMap: attachmentIdMap,
-                                                       transaction: transaction)
-            }
+        firstly {
+            AttachmentMultisend.sendApprovedMedia(conversations: conversations,
+                                                  approvalMessageBody: self.approvalMessageBody,
+                                                  approvedAttachments: approvedAttachments)
         }.done { _ in
-            self.delegate?.cameraFirstCaptureSendFlowDidComplete(self)
-        }.retainUntilComplete()
+                self.delegate?.cameraFirstCaptureSendFlowDidComplete(self)
+        }.catch { error in
+            owsFailDebug("Error: \(error)")
+        }
+    }
+
+    public func conversationPickerCanCancel(_ conversationPickerViewController: ConversationPickerViewController) -> Bool {
+        return false
+    }
+
+    public func conversationPickerDidCancel(_ conversationPickerViewController: ConversationPickerViewController) {
+        owsFailDebug("Camera-first capture flow should never cancel conversation picker.")
+    }
+
+    public func approvalMode(_ conversationPickerViewController: ConversationPickerViewController) -> ApprovalMode {
+        return .send
     }
 }

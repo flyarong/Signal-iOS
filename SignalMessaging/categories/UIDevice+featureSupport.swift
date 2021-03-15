@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -11,6 +11,9 @@ public extension UIDevice {
     }
 
     var hasIPhoneXNotch: Bool {
+        // Only phones have notch
+        guard !isIPad else { return false }
+
         switch UIScreen.main.nativeBounds.height {
         case 960:
             //  iPad in iPhone compatibility mode (using old iPhone 4 screen size)
@@ -27,11 +30,20 @@ public extension UIDevice {
         case 1920, 2208:
             // iPhone 6+/6S+/7+/8+//
             return false
+        case 2340:
+            // iPhone 12 Mini
+            return true
         case 2436:
             // iPhone X, iPhone XS
             return true
+        case 2532:
+            // iPhone 12 Pro
+            return true
         case 2688:
             // iPhone X Max
+            return true
+        case 2778:
+            // iPhone 12 Pro Max
             return true
         default:
             // Verify all our IOS_DEVICE_CONSTANT tags make sense when adding a new device size.
@@ -40,18 +52,74 @@ public extension UIDevice {
         }
     }
 
-    var isShorterThanIPhone5: Bool {
-        return UIScreen.main.bounds.height < 568
+    var isPlusSizePhone: Bool {
+        guard !isIPad else { return false }
+
+        switch UIScreen.main.nativeBounds.height {
+        case 960:
+            //  iPad in iPhone compatibility mode (using old iPhone 4 screen size)
+            return false
+        case 1136:
+            // iPhone 5 or 5S or 5C
+            return false
+        case 1334:
+            // iPhone 6/6S/7/8
+            return false
+        case 1792:
+            // iPhone XR
+            return true
+        case 1920, 2208:
+            // iPhone 6+/6S+/7+/8+//
+            return true
+        case 2340:
+            // iPhone 12 Mini
+            return false
+        case 2436:
+            // iPhone X, iPhone XS
+            return false
+        case 2532:
+            // iPhone 12 Pro
+            return false
+        case 2688:
+            // iPhone X Max
+            return true
+        case 2778:
+            // iPhone 12 Pro Max
+            return true
+        default:
+            // Verify all our IOS_DEVICE_CONSTANT tags make sense when adding a new device size.
+            owsFailDebug("unknown device format")
+            return false
+        }
+    }
+
+    var isNarrowerThanIPhone6: Bool {
+        return CurrentAppContext().frame.width < 375
+    }
+
+    var isIPhone5OrShorter: Bool {
+        return CurrentAppContext().frame.height <= 568
+    }
+
+    var isCompatabilityModeIPad: Bool {
+        return userInterfaceIdiom == .phone && model.hasPrefix("iPad")
     }
 
     var isIPad: Bool {
-        let isNativeIPad = UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiom.pad
-        let isCompatabilityModeIPad = UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiom.phone && self.model.hasPrefix("iPad")
-
-        return isNativeIPad || isCompatabilityModeIPad
+        return userInterfaceIdiom == .pad
     }
 
-    func ows_setOrientation(_ orientation: UIInterfaceOrientation) {
+    var isFullScreen: Bool {
+        let windowSize = CurrentAppContext().frame.size
+        let screenSize = UIScreen.main.bounds.size
+        return windowSize.largerAxis == screenSize.largerAxis && windowSize.smallerAxis == screenSize.smallerAxis
+    }
+
+    var defaultSupportedOrienations: UIInterfaceOrientationMask {
+        return isIPad ? .all : .allButUpsideDown
+    }
+
+    func ows_setOrientation(_ orientation: UIDeviceOrientation) {
         // XXX - This is not officially supported, but there's no other way to programmatically rotate
         // the interface.
         let orientationKey = "orientation"

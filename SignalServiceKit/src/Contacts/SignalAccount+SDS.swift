@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -12,6 +12,8 @@ import SignalCoreKit
 // MARK: - Record
 
 public struct SignalAccountRecord: SDSRecord {
+    public weak var delegate: SDSRecordDelegate?
+
     public var tableMetadata: SDSTableMetadata {
         return SignalAccountSerializer.table
     }
@@ -25,10 +27,10 @@ public struct SignalAccountRecord: SDSRecord {
     public let recordType: SDSRecordType
     public let uniqueId: String
 
-    // Base class properties
-    public let accountSchemaVersion: UInt
+    // Properties
     public let contact: Data?
-    public let hasMultipleAccountContact: Bool
+    public let contactAvatarHash: Data?
+    public let contactAvatarJpegData: Data?
     public let multipleAccountLabelText: String
     public let recipientPhoneNumber: String?
     public let recipientUUID: String?
@@ -37,9 +39,9 @@ public struct SignalAccountRecord: SDSRecord {
         case id
         case recordType
         case uniqueId
-        case accountSchemaVersion
         case contact
-        case hasMultipleAccountContact
+        case contactAvatarHash
+        case contactAvatarJpegData
         case multipleAccountLabelText
         case recipientPhoneNumber
         case recipientUUID
@@ -47,6 +49,14 @@ public struct SignalAccountRecord: SDSRecord {
 
     public static func columnName(_ column: SignalAccountRecord.CodingKeys, fullyQualified: Bool = false) -> String {
         return fullyQualified ? "\(databaseTableName).\(column.rawValue)" : column.rawValue
+    }
+
+    public func didInsert(with rowID: Int64, for column: String?) {
+        guard let delegate = delegate else {
+            owsFailDebug("Missing delegate.")
+            return
+        }
+        delegate.updateRowId(rowID)
     }
 }
 
@@ -61,9 +71,9 @@ public extension SignalAccountRecord {
         id = row[0]
         recordType = row[1]
         uniqueId = row[2]
-        accountSchemaVersion = row[3]
-        contact = row[4]
-        hasMultipleAccountContact = row[5]
+        contact = row[3]
+        contactAvatarHash = row[4]
+        contactAvatarJpegData = row[5]
         multipleAccountLabelText = row[6]
         recipientPhoneNumber = row[7]
         recipientUUID = row[8]
@@ -98,18 +108,19 @@ extension SignalAccount {
         case .signalAccount:
 
             let uniqueId: String = record.uniqueId
-            let accountSchemaVersion: UInt = record.accountSchemaVersion
             let contactSerialized: Data? = record.contact
             let contact: Contact? = try SDSDeserialization.optionalUnarchive(contactSerialized, name: "contact")
-            let hasMultipleAccountContact: Bool = record.hasMultipleAccountContact
+            let contactAvatarHash: Data? = SDSDeserialization.optionalData(record.contactAvatarHash, name: "contactAvatarHash")
+            let contactAvatarJpegData: Data? = SDSDeserialization.optionalData(record.contactAvatarJpegData, name: "contactAvatarJpegData")
             let multipleAccountLabelText: String = record.multipleAccountLabelText
             let recipientPhoneNumber: String? = record.recipientPhoneNumber
             let recipientUUID: String? = record.recipientUUID
 
-            return SignalAccount(uniqueId: uniqueId,
-                                 accountSchemaVersion: accountSchemaVersion,
+            return SignalAccount(grdbId: recordId,
+                                 uniqueId: uniqueId,
                                  contact: contact,
-                                 hasMultipleAccountContact: hasMultipleAccountContact,
+                                 contactAvatarHash: contactAvatarHash,
+                                 contactAvatarJpegData: contactAvatarJpegData,
                                  multipleAccountLabelText: multipleAccountLabelText,
                                  recipientPhoneNumber: recipientPhoneNumber,
                                  recipientUUID: recipientUUID)
@@ -147,22 +158,70 @@ extension SignalAccount: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension SignalAccount: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == SignalAccount.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            // NOTE: If this generates build errors, you made need to
+            // modify DeepCopy.swift to support this type.
+            //
+            // That might mean:
+            //
+            // * Implement DeepCopyable for this type (e.g. a model).
+            // * Modify DeepCopies.deepCopy() to support this type (e.g. a collection).
+            let contact: Contact?
+            if let contactForCopy = modelToCopy.contact {
+               contact = try DeepCopies.deepCopy(contactForCopy)
+            } else {
+               contact = nil
+            }
+            let contactAvatarHash: Data? = modelToCopy.contactAvatarHash
+            let contactAvatarJpegData: Data? = modelToCopy.contactAvatarJpegData
+            let multipleAccountLabelText: String = modelToCopy.multipleAccountLabelText
+            let recipientPhoneNumber: String? = modelToCopy.recipientPhoneNumber
+            let recipientUUID: String? = modelToCopy.recipientUUID
+
+            return SignalAccount(grdbId: id,
+                                 uniqueId: uniqueId,
+                                 contact: contact,
+                                 contactAvatarHash: contactAvatarHash,
+                                 contactAvatarJpegData: contactAvatarJpegData,
+                                 multipleAccountLabelText: multipleAccountLabelText,
+                                 recipientPhoneNumber: recipientPhoneNumber,
+                                 recipientUUID: recipientUUID)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension SignalAccountSerializer {
 
     // This defines all of the columns used in the table
     // where this model (and any subclasses) are persisted.
-    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey, columnIndex: 0)
-    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64, columnIndex: 1)
-    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true, columnIndex: 2)
-    // Base class properties
-    static let accountSchemaVersionColumn = SDSColumnMetadata(columnName: "accountSchemaVersion", columnType: .int64, columnIndex: 3)
-    static let contactColumn = SDSColumnMetadata(columnName: "contact", columnType: .blob, isOptional: true, columnIndex: 4)
-    static let hasMultipleAccountContactColumn = SDSColumnMetadata(columnName: "hasMultipleAccountContact", columnType: .int, columnIndex: 5)
-    static let multipleAccountLabelTextColumn = SDSColumnMetadata(columnName: "multipleAccountLabelText", columnType: .unicodeString, columnIndex: 6)
-    static let recipientPhoneNumberColumn = SDSColumnMetadata(columnName: "recipientPhoneNumber", columnType: .unicodeString, isOptional: true, columnIndex: 7)
-    static let recipientUUIDColumn = SDSColumnMetadata(columnName: "recipientUUID", columnType: .unicodeString, isOptional: true, columnIndex: 8)
+    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey)
+    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64)
+    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true)
+    // Properties
+    static let contactColumn = SDSColumnMetadata(columnName: "contact", columnType: .blob, isOptional: true)
+    static let contactAvatarHashColumn = SDSColumnMetadata(columnName: "contactAvatarHash", columnType: .blob, isOptional: true)
+    static let contactAvatarJpegDataColumn = SDSColumnMetadata(columnName: "contactAvatarJpegData", columnType: .blob, isOptional: true)
+    static let multipleAccountLabelTextColumn = SDSColumnMetadata(columnName: "multipleAccountLabelText", columnType: .unicodeString)
+    static let recipientPhoneNumberColumn = SDSColumnMetadata(columnName: "recipientPhoneNumber", columnType: .unicodeString, isOptional: true)
+    static let recipientUUIDColumn = SDSColumnMetadata(columnName: "recipientUUID", columnType: .unicodeString, isOptional: true)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -172,9 +231,9 @@ extension SignalAccountSerializer {
         idColumn,
         recordTypeColumn,
         uniqueIdColumn,
-        accountSchemaVersionColumn,
         contactColumn,
-        hasMultipleAccountContactColumn,
+        contactAvatarHashColumn,
+        contactAvatarJpegDataColumn,
         multipleAccountLabelTextColumn,
         recipientPhoneNumberColumn,
         recipientUUIDColumn
@@ -189,14 +248,14 @@ public extension SignalAccount {
         sdsSave(saveMode: .insert, transaction: transaction)
     }
 
-    // This method is private; we should never use it directly.
-    // Instead, use anyUpdate(transaction:block:), so that we
-    // use the "update with" pattern.
-    private func anyUpdate(transaction: SDSAnyWriteTransaction) {
-        sdsSave(saveMode: .update, transaction: transaction)
-    }
-
-    @available(*, deprecated, message: "Use anyInsert() or anyUpdate() instead.")
+    // Avoid this method whenever feasible.
+    //
+    // If the record has previously been saved, this method does an overwriting
+    // update of the corresponding row, otherwise if it's a new record, this
+    // method inserts a new row.
+    //
+    // For performance, when possible, you should explicitly specify whether
+    // you are inserting or updating rather than calling this method.
     func anyUpsert(transaction: SDSAnyWriteTransaction) {
         let isInserting: Bool
         if SignalAccount.anyFetch(uniqueId: uniqueId, transaction: transaction) != nil {
@@ -247,7 +306,20 @@ public extension SignalAccount {
             block(dbCopy)
         }
 
-        dbCopy.anyUpdate(transaction: transaction)
+        dbCopy.sdsSave(saveMode: .update, transaction: transaction)
+    }
+
+    // This method is an alternative to `anyUpdate(transaction:block:)` methods.
+    //
+    // We should generally use `anyUpdate` to ensure we're not unintentionally
+    // clobbering other columns in the database when another concurrent update
+    // has occured.
+    //
+    // There are cases when this doesn't make sense, e.g. when  we know we've
+    // just loaded the model in the same transaction. In those cases it is
+    // safe and faster to do a "overwriting" update
+    func anyOverwritingUpdate(transaction: SDSAnyWriteTransaction) {
+        sdsSave(saveMode: .update, transaction: transaction)
     }
 
     func anyRemove(transaction: SDSAnyWriteTransaction) {
@@ -274,9 +346,11 @@ public extension SignalAccount {
 
 @objc
 public class SignalAccountCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<SignalAccountRecord>?
 
-    init(cursor: RecordCursor<SignalAccountRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<SignalAccountRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -287,7 +361,9 @@ public class SignalAccountCursor: NSObject {
         guard let record = try cursor.next() else {
             return nil
         }
-        return try SignalAccount.fromRecord(record)
+        let value = try SignalAccount.fromRecord(record)
+        SSKEnvironment.shared.modelReadCaches.signalAccountReadCache.didReadSignalAccount(value, transaction: transaction.asAnyRead)
+        return value
     }
 
     public func all() throws -> [SignalAccount] {
@@ -318,10 +394,10 @@ public extension SignalAccount {
         let database = transaction.database
         do {
             let cursor = try SignalAccountRecord.fetchCursor(database)
-            return SignalAccountCursor(cursor: cursor)
+            return SignalAccountCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return SignalAccountCursor(cursor: nil)
+            return SignalAccountCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -527,11 +603,11 @@ public extension SignalAccount {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try SignalAccountRecord.fetchCursor(transaction.database, sqlRequest)
-            return SignalAccountCursor(cursor: cursor)
+            return SignalAccountCursor(transaction: transaction, cursor: cursor)
         } catch {
             Logger.error("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return SignalAccountCursor(cursor: nil)
+            return SignalAccountCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -546,7 +622,9 @@ public extension SignalAccount {
                 return nil
             }
 
-            return try SignalAccount.fromRecord(record)
+            let value = try SignalAccount.fromRecord(record)
+            SSKEnvironment.shared.modelReadCaches.signalAccountReadCache.didReadSignalAccount(value, transaction: transaction.asAnyRead)
+            return value
         } catch {
             owsFailDebug("error: \(error)")
             return nil
@@ -568,19 +646,36 @@ class SignalAccountSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .signalAccount
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
-        let accountSchemaVersion: UInt = model.accountSchemaVersion
+        // Properties
         let contact: Data? = optionalArchive(model.contact)
-        let hasMultipleAccountContact: Bool = model.hasMultipleAccountContact
+        let contactAvatarHash: Data? = model.contactAvatarHash
+        let contactAvatarJpegData: Data? = model.contactAvatarJpegData
         let multipleAccountLabelText: String = model.multipleAccountLabelText
         let recipientPhoneNumber: String? = model.recipientPhoneNumber
         let recipientUUID: String? = model.recipientUUID
 
-        return SignalAccountRecord(id: id, recordType: recordType, uniqueId: uniqueId, accountSchemaVersion: accountSchemaVersion, contact: contact, hasMultipleAccountContact: hasMultipleAccountContact, multipleAccountLabelText: multipleAccountLabelText, recipientPhoneNumber: recipientPhoneNumber, recipientUUID: recipientUUID)
+        return SignalAccountRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, contact: contact, contactAvatarHash: contactAvatarHash, contactAvatarJpegData: contactAvatarJpegData, multipleAccountLabelText: multipleAccountLabelText, recipientPhoneNumber: recipientPhoneNumber, recipientUUID: recipientUUID)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension SignalAccount {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> SignalAccount {
+        guard let record = try asRecord() as? SignalAccountRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try SignalAccount.fromRecord(record)
+    }
+}
+#endif

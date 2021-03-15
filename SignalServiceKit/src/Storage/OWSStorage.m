@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSStorage.h"
@@ -53,6 +53,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
             OWSLogError(@"storageMode: %@.", SSKFeatureFlags.storageModeDescription);                                  \
             OWSLogError(                                                                                               \
                 @"StorageCoordinatorState: %@.", NSStringFromStorageCoordinatorState(self.storageCoordinator.state));  \
+            OWSLogError(@"dataStoreForUI: %@.", NSStringForDataStore(StorageCoordinator.dataStoreForUI));              \
             switch (SSKFeatureFlags.storageModeStrictness) {                                                           \
                 case StorageModeStrictnessFail:                                                                        \
                     OWSFail(@"Unexpected YDB read.");                                                                  \
@@ -78,6 +79,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
             OWSLogError(@"storageMode: %@.", SSKFeatureFlags.storageModeDescription);                                  \
             OWSLogError(                                                                                               \
                 @"StorageCoordinatorState: %@.", NSStringFromStorageCoordinatorState(self.storageCoordinator.state));  \
+            OWSLogError(@"dataStoreForUI: %@.", NSStringForDataStore(StorageCoordinator.dataStoreForUI));              \
             switch (SSKFeatureFlags.storageModeStrictness) {                                                           \
                 case StorageModeStrictnessFail:                                                                        \
                     OWSFail(@"Unexpected YDB write.");                                                                 \
@@ -173,8 +175,9 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
 // Specifically, it causes YDB's "view version" checks to fail.
 - (void)readWriteWithBlock:(void (^)(YapDatabaseReadWriteTransaction *transaction))block
 {
-    OWSAssertCanWriteYDB();
-    OWSAssertDebug(self.databaseStorage.canWriteToYdb);
+    if (!self.isCleanupConnection) {
+        OWSAssertCanWriteYDB();
+    }
     id<OWSDatabaseConnectionDelegate> delegate = self.delegate;
     OWSAssertDebug(delegate);
     OWSAssertDebug(delegate.areAllRegistrationsComplete);
@@ -765,12 +768,12 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
 
 + (void)deleteDatabaseFiles
 {
-    [OWSFileSystem deleteFile:[OWSPrimaryStorage legacyDatabaseFilePath]];
-    [OWSFileSystem deleteFile:[OWSPrimaryStorage legacyDatabaseFilePath_SHM]];
-    [OWSFileSystem deleteFile:[OWSPrimaryStorage legacyDatabaseFilePath_WAL]];
-    [OWSFileSystem deleteFile:[OWSPrimaryStorage sharedDataDatabaseFilePath]];
-    [OWSFileSystem deleteFile:[OWSPrimaryStorage sharedDataDatabaseFilePath_SHM]];
-    [OWSFileSystem deleteFile:[OWSPrimaryStorage sharedDataDatabaseFilePath_WAL]];
+    [OWSFileSystem deleteFileIfExists:[OWSPrimaryStorage legacyDatabaseFilePath]];
+    [OWSFileSystem deleteFileIfExists:[OWSPrimaryStorage legacyDatabaseFilePath_SHM]];
+    [OWSFileSystem deleteFileIfExists:[OWSPrimaryStorage legacyDatabaseFilePath_WAL]];
+    [OWSFileSystem deleteFileIfExists:[OWSPrimaryStorage sharedDataDatabaseFilePath]];
+    [OWSFileSystem deleteFileIfExists:[OWSPrimaryStorage sharedDataDatabaseFilePath_SHM]];
+    [OWSFileSystem deleteFileIfExists:[OWSPrimaryStorage sharedDataDatabaseFilePath_WAL]];
     // NOTE: It's NOT safe to delete OWSPrimaryStorage.legacyDatabaseDirPath
     //       which is the app document dir.
     [OWSFileSystem deleteContentsOfDirectory:OWSPrimaryStorage.sharedDataDatabaseDirPath];
@@ -801,10 +804,8 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
 
     [self deleteDBKeys];
 
-    [OWSKeyBackupService clearKeychain];
-
     if (CurrentAppContext().isMainApp) {
-        [TSAttachmentStream deleteAttachments];
+        [TSAttachmentStream deleteAttachmentsFromDisk];
     }
 
     // TODO: Delete Profiles on Disk?
@@ -924,13 +925,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
         // * The keychain has become corrupt.
         BOOL doesDBExist = [NSFileManager.defaultManager fileExistsAtPath:[self databaseFilePath]];
         if (doesDBExist) {
-            if (SSKFeatureFlags.storageMode == StorageModeYdb) {
-                OWSFail(@"Could not load database metadata");
-            } else if (SSKFeatureFlags.storageMode == StorageModeGrdb && ![SSKPreferences isYdbMigrated]) {
-                OWSFail(@"Could not load database metadata");
-            } else {
-                OWSFailDebug(@"Could not load database metadata");
-            }
+            OWSFail(@"Could not load database metadata");
             OWSProdCritical([OWSAnalyticsEvents storageErrorCouldNotLoadDatabaseSecondAttempt]);
         }
 

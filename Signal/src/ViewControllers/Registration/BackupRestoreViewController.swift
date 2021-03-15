@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -8,12 +8,6 @@ import UIKit
 public class BackupRestoreViewController: OWSTableViewController {
 
     private var hasBegunImport = false
-
-    // MARK: - Dependencies
-
-    private var backup: OWSBackup {
-        return AppEnvironment.shared.backup
-    }
 
     // MARK: -
 
@@ -123,7 +117,7 @@ public class BackupRestoreViewController: OWSTableViewController {
 
         backup.setHasPendingRestoreDecision(false)
 
-        showHomeView()
+        showConversationSplitView()
     }
 
     @objc
@@ -135,16 +129,16 @@ public class BackupRestoreViewController: OWSTableViewController {
         backup.tryToImport()
     }
 
-    private func showHomeView() {
+    private func showConversationSplitView() {
         // In production, this view will never be presented in a modal.
         // During testing (debug UI, etc.), it may be a modal.
         let isModal = navigationController?.presentingViewController != nil
         if isModal {
             dismiss(animated: true, completion: {
-                SignalApp.shared().showHomeView()
+                SignalApp.shared().showConversationSplitView()
             })
         } else {
-            SignalApp.shared().showHomeView()
+            SignalApp.shared().showConversationSplitView()
         }
 
         NotificationCenter.default.removeObserver(self)
@@ -161,7 +155,7 @@ public class BackupRestoreViewController: OWSTableViewController {
         if backup.backupImportState == .succeeded {
             backup.setHasPendingRestoreDecision(false)
 
-            showHomeView()
+            showConversationSplitView()
         } else {
             updateTableContents()
         }
@@ -170,6 +164,6 @@ public class BackupRestoreViewController: OWSTableViewController {
     // MARK: Orientation
 
     public override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        return .portrait
+        return UIDevice.current.isIPad ? .all : .portrait
     }
 }

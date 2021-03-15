@@ -1,28 +1,15 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import UIKit
 
 @objc
-public protocol NavBarLayoutDelegate: class {
-    func navBarCallLayoutDidChange(navbar: OWSNavigationBar)
-}
-
-@objc
 public class OWSNavigationBar: UINavigationBar {
 
     @objc
-    public weak var navBarLayoutDelegate: NavBarLayoutDelegate?
-
-    @objc
     public let navbarWithoutStatusHeight: CGFloat = 44
-
-    @objc
-    public var callBannerHeight: CGFloat {
-        return OWSWindowManagerCallBannerHeight()
-    }
 
     @objc
     public var statusBarHeight: CGFloat {
@@ -31,7 +18,7 @@ public class OWSNavigationBar: UINavigationBar {
 
     @objc
     public var fullWidth: CGFloat {
-        return UIScreen.main.bounds.size.width
+        return superview?.frame.width ?? .zero
     }
 
     public required init?(coder aDecoder: NSCoder) {
@@ -47,46 +34,39 @@ public class OWSNavigationBar: UINavigationBar {
 
         applyTheme()
 
-        NotificationCenter.default.addObserver(self, selector: #selector(callDidChange), name: .OWSWindowManagerCallDidChange, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(didChangeStatusBarFrame), name: UIApplication.didChangeStatusBarFrameNotification, object: nil)
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(themeDidChange),
                                                name: .ThemeDidChange,
                                                object: nil)
     }
 
-    // MARK: FirstResponder Stubbing
+    // MARK: Theme
 
-    @objc
-    public weak var stubbedNextResponder: UIResponder?
-
-    override public var next: UIResponder? {
-        if let stubbedNextResponder = self.stubbedNextResponder {
-            return stubbedNextResponder
-        }
-
-        return super.next
+    public var navbarBackgroundColorOverride: UIColor? {
+        didSet { applyTheme() }
     }
 
-    // MARK: Theme
+    var navbarBackgroundColor: UIColor {
+        if let navbarBackgroundColorOverride = navbarBackgroundColorOverride { return navbarBackgroundColorOverride }
+        switch currentStyle {
+        case .secondaryBar: return Theme.secondaryBackgroundColor
+        default: return Theme.navbarBackgroundColor
+        }
+    }
 
     private func applyTheme() {
         guard respectsTheme else {
             return
         }
 
-        if UIAccessibility.isReduceTransparencyEnabled {
+        if [.secondaryBar, .solid].contains(currentStyle) {
+            let backgroundImage = UIImage(color: navbarBackgroundColor)
+            self.setBackgroundImage(backgroundImage, for: .default)
+        } else if UIAccessibility.isReduceTransparencyEnabled {
             blurEffectView?.isHidden = true
-            let color = Theme.navbarBackgroundColor
-            let backgroundImage = UIImage(color: color)
+            let backgroundImage = UIImage(color: navbarBackgroundColor)
             self.setBackgroundImage(backgroundImage, for: .default)
         } else {
-            // Make navbar more translucent than default. Navbars remove alpha from any assigned backgroundColor, so
-            // to achieve transparency, we have to assign a transparent image.
-            let color = Theme.navbarBackgroundColor.withAlphaComponent(OWSNavigationBar.backgroundBlurMutingFactor)
-            let backgroundImage = UIImage(color: color)
-            self.setBackgroundImage(backgroundImage, for: .default)
-
             let blurEffect = Theme.barBlurEffect
 
             let blurEffectView: UIVisualEffectView = {
@@ -116,37 +96,32 @@ public class OWSNavigationBar: UINavigationBar {
             // On iOS11, despite inserting the blur at 0, other views are later inserted into the navbar behind the blur,
             // so we have to set a zindex to avoid obscuring navbar title/buttons.
             blurEffectView.layer.zPosition = -1
-        }
-    }
 
-    public func snapshotViewIncludingBackground(afterScreenUpdates: Bool) -> UIView? {
-        let originalFrame = self.frame
-        let originalBounds = self.bounds
+            // Alter the visual effect view's tint to match our background color
+            // so the navbar, when over a solid color background matching navbarBackgroundColor,
+            // exactly matches the background color. This is brittle, but there is no way to get
+            // this behavior from UIVisualEffectView otherwise.
+            if let tintingView = blurEffectView.subviews.first(where: {
+                String(describing: type(of: $0)) == "_UIVisualEffectSubview"
+            }) {
+                tintingView.backgroundColor = navbarBackgroundColor.withAlphaComponent(OWSNavigationBar.backgroundBlurMutingFactor)
+                self.setBackgroundImage(UIImage(), for: .default)
+            } else {
+                if #available(iOS 15, *) { owsFailDebug("Check if this still works on new iOS version.") }
 
-        // NavigationBars are weird because though it appears as though the status bar
-        // content is "in" or maybe "above" (z-index) the navbar, the navbar frame is strictly
-        // lower (y-index) than the status bar.
-        // To work with that, the navbar background, including the blur effect when transparency
-        // is enabled, extends beyond the navbars's bounds. This allows the background to extend
-        // up (y-index) and under (z-index) the status bar, without clips to bounds.
-        //
-        // Snapshots, however, clip to bounds. So as to capture the full size of the background
-        // in our snapshot we temporarily adjust the navbars frame.
-        self.frame = CGRect(x: 0, y: callBannerHeight, width: fullWidth, height: navbarWithoutStatusHeight + statusBarHeight)
-        self.bounds = self.frame
-        defer {
-            self.frame = originalFrame
-            self.bounds = originalBounds
-        }
-
-        guard let barSnapshot = self.snapshotView(afterScreenUpdates: afterScreenUpdates) else {
-            owsFailDebug("barSnapshot was unexpectedly nil")
-            return nil
+                owsFailDebug("Unexpectedly missing visual effect subview")
+                // If we can't find the tinting subview (e.g. a new iOS version changed the behavior)
+                // We'll make the navbar more translucent by setting a background color.
+                let color = navbarBackgroundColor.withAlphaComponent(OWSNavigationBar.backgroundBlurMutingFactor)
+                let backgroundImage = UIImage(color: color)
+                self.setBackgroundImage(backgroundImage, for: .default)
+            }
         }
 
-        barSnapshot.frame.origin = .zero
-
-        return barSnapshot
+        // We always want to treat the bar as translucent, regardless of
+        // whether the background image is actually translucent. Otherwise,
+        // it messes weirdly with safe area insets.
+        self.isTranslucent = true
     }
 
     @objc
@@ -162,84 +137,29 @@ public class OWSNavigationBar: UINavigationBar {
         }
     }
 
-    // MARK: Layout
-
-    @objc
-    public func callDidChange() {
-        Logger.debug("")
-        self.navBarLayoutDelegate?.navBarCallLayoutDidChange(navbar: self)
-    }
-
-    @objc
-    public func didChangeStatusBarFrame() {
-        Logger.debug("")
-        self.navBarLayoutDelegate?.navBarCallLayoutDidChange(navbar: self)
-    }
-
-    public override func sizeThatFits(_ size: CGSize) -> CGSize {
-        guard OWSWindowManager.shared().hasCall() else {
-            return super.sizeThatFits(size)
-        }
-
-        if #available(iOS 11, *) {
-            return super.sizeThatFits(size)
-        } else if #available(iOS 10, *) {
-            // iOS10
-            // sizeThatFits is repeatedly called to determine how much space to reserve for that navbar.
-            // That is, increasing this causes the child view controller to be pushed down.
-            // (as of iOS11, this is not used and instead we use additionalSafeAreaInsets)
-            return CGSize(width: fullWidth, height: navbarWithoutStatusHeight + statusBarHeight)
-        } else {
-            // iOS9
-            // sizeThatFits is repeatedly called to determine how much space to reserve for that navbar.
-            // That is, increasing this causes the child view controller to be pushed down.
-            // (as of iOS11, this is not used and instead we use additionalSafeAreaInsets)            
-            return CGSize(width: fullWidth, height: navbarWithoutStatusHeight + callBannerHeight + 20)
-        }
-    }
-
-    public override func layoutSubviews() {
-        guard CurrentAppContext().isMainApp else {
-            super.layoutSubviews()
-            return
-        }
-        guard OWSWindowManager.shared().hasCall() else {
-            super.layoutSubviews()
-            return
-        }
-
-        guard #available(iOS 11, *) else {
-            super.layoutSubviews()
-            return
-        }
-
-        self.frame = CGRect(x: 0, y: callBannerHeight, width: fullWidth, height: navbarWithoutStatusHeight)
-        self.bounds = CGRect(x: 0, y: 0, width: fullWidth, height: navbarWithoutStatusHeight)
-
-        super.layoutSubviews()
-
-        // This is only necessary on iOS11, which has some private views within that lay outside of the navbar.
-        // They aren't actually visible behind the call status bar, but they looks strange during present/dismiss
-        // animations for modal VC's
-        for subview in self.subviews {
-            let stringFromClass = NSStringFromClass(subview.classForCoder)
-            if stringFromClass.contains("BarBackground") {
-                subview.frame = self.bounds
-            } else if stringFromClass.contains("BarContentView") {
-                subview.frame = self.bounds
-            }
-        }
-    }
-
     // MARK: Override Theme
 
     @objc
-    public enum NavigationBarThemeOverride: Int {
-        case clear, alwaysDark, removeOverride
+    public enum NavigationBarStyle: Int {
+        case clear, solid, alwaysDarkAndClear, alwaysDark, `default`, secondaryBar
     }
 
+    private var currentStyle: NavigationBarStyle?
+
     @objc
-    public func overrideTheme(type: NavigationBarThemeOverride) {
+    public func switchToStyle(_ style: NavigationBarStyle, animated: Bool = false) {
+        guard currentStyle != style else { return }
+
+        if animated {
+            let animation = CATransition()
+            animation.duration = 0.35
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            animation.type = .fade
+            layer.add(animation, forKey: "ows_fade")
+        } else {
+            layer.removeAnimation(forKey: "ows_fade")
+        }
+
         let applyDarkThemeOverride = {
             self.barStyle = .black
             self.titleTextAttributes = [NSAttributedString.Key.foregroundColor: Theme.darkThemePrimaryColor]
@@ -249,9 +169,9 @@ public class OWSNavigationBar: UINavigationBar {
 
         let removeDarkThemeOverride = {
             self.barStyle = Theme.barStyle
-            self.titleTextAttributes = [NSAttributedString.Key.foregroundColor: Theme.primaryColor]
+            self.titleTextAttributes = [NSAttributedString.Key.foregroundColor: Theme.primaryTextColor]
             self.barTintColor = Theme.backgroundColor.withAlphaComponent(0.6)
-            self.tintColor = Theme.primaryColor
+            self.tintColor = Theme.primaryTextColor
         }
 
         let applyTransparentBarOverride = {
@@ -272,19 +192,45 @@ public class OWSNavigationBar: UINavigationBar {
             self.shadowImage = nil
         }
 
-        switch type {
+        let applySecondaryAndSolidBarOverride = {
+            self.blurEffectView?.isHidden = true
+            self.shadowImage = UIImage()
+        }
+
+        let removeSecondaryAndSolidBarOverride = {
+            self.blurEffectView?.isHidden = false
+            self.shadowImage = nil
+        }
+
+        currentStyle = style
+
+        switch style {
         case .clear:
             respectsTheme = false
+            removeSecondaryAndSolidBarOverride()
+            removeDarkThemeOverride()
+            applyTransparentBarOverride()
+        case .alwaysDarkAndClear:
+            respectsTheme = false
+            removeSecondaryAndSolidBarOverride()
             applyDarkThemeOverride()
             applyTransparentBarOverride()
         case .alwaysDark:
             respectsTheme = false
-            applyDarkThemeOverride()
+            removeSecondaryAndSolidBarOverride()
             removeTransparentBarOverride()
-        case .removeOverride:
+            applyDarkThemeOverride()
+        case .default:
             respectsTheme = true
             removeDarkThemeOverride()
             removeTransparentBarOverride()
+            removeSecondaryAndSolidBarOverride()
+            applyTheme()
+        case .solid, .secondaryBar:
+            respectsTheme = true
+            removeDarkThemeOverride()
+            removeTransparentBarOverride()
+            applySecondaryAndSolidBarOverride()
             applyTheme()
         }
     }

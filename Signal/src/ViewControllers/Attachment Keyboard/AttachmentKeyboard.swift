@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,7 +10,7 @@ import PromiseKit
 protocol AttachmentKeyboardDelegate {
     func didSelectRecentPhoto(asset: PHAsset, attachment: SignalAttachment)
     func didTapGalleryButton()
-    func didTapCamera(withPhotoCapture: PhotoCapture?)
+    func didTapCamera()
     func didTapGif()
     func didTapFile()
     func didTapContact()
@@ -45,7 +45,11 @@ class AttachmentKeyboard: CustomKeyboard {
     )
 
     private var mediaLibraryAuthorizationStatus: PHAuthorizationStatus {
-        return PHPhotoLibrary.authorizationStatus()
+        if #available(iOS 14, *) {
+            return PHPhotoLibrary.ows_authorizationStatus(for: .readWrite)
+        } else {
+            return PHPhotoLibrary.authorizationStatus()
+        }
     }
 
     // MARK: -
@@ -60,12 +64,17 @@ class AttachmentKeyboard: CustomKeyboard {
 
         contentView.addSubview(mainStackView)
         mainStackView.autoPinWidthToSuperview()
-        mainStackView.autoPinEdge(toSuperviewEdge: .top)
+        mainStackView.autoPinEdge(toSuperviewEdge: .top, withInset: UIDevice.current.isIPad ? 8 : 0)
         mainStackView.autoPinEdge(toSuperviewSafeArea: .bottom, withInset: 8)
 
         setupRecentPhotos()
         setupGalleryButton()
         setupFormatPicker()
+
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(keyboardFrameDidChange),
+                                               name: UIResponder.keyboardDidChangeFrameNotification,
+                                               object: nil)
     }
 
     required init?(coder aDecoder: NSCoder) {
@@ -108,10 +117,10 @@ class AttachmentKeyboard: CustomKeyboard {
 
     func setupGalleryButton() {
         addSubview(galleryButton)
-        galleryButton.setTemplateImage(#imageLiteral(resourceName: "photo-outline-28"), tintColor: .white)
+        galleryButton.setTemplateImage(#imageLiteral(resourceName: "photo-album-outline-28"), tintColor: .white)
         galleryButton.setBackgroundImage(UIImage(color: UIColor.black.withAlphaComponent(0.7)), for: .normal)
 
-        galleryButton.autoSetDimensions(to: CGSize(width: 48, height: 48))
+        galleryButton.autoSetDimensions(to: CGSize(square: 48))
         galleryButton.clipsToBounds = true
         galleryButton.layer.cornerRadius = 24
 
@@ -149,28 +158,31 @@ class AttachmentKeyboard: CustomKeyboard {
         }
     }
 
-    override func wasDismissed() {
-        super.wasDismissed()
-
-        attachmentFormatPickerView.stopCameraPreview()
-    }
-
-    override func orientationDidChange() {
-        super.orientationDidChange()
-
+    @objc func keyboardFrameDidChange() {
         updateItemSizes()
     }
 
     func updateItemSizes() {
         // The items should always expand to fit the height of their collection view.
-        // We'll always just have one row of items.
-        recentPhotosCollectionView.itemSize = CGSize(square: recentPhotosCollectionView.height())
-        attachmentFormatPickerView.itemSize = CGSize(square: attachmentFormatPickerView.height())
+
+        // If we have space we will show two rows of recent photos (e.g. iPad in landscape).
+        if recentPhotosCollectionView.height > 250 {
+            recentPhotosCollectionView.itemSize = CGSize(square:
+                (recentPhotosCollectionView.height - recentPhotosCollectionView.spaceBetweenRows) / 2
+            )
+
+        // Otherwise, assume the recent photos take up the full height of the collection view.
+        } else {
+            recentPhotosCollectionView.itemSize = CGSize(square: recentPhotosCollectionView.height)
+        }
+
+        // There is only ever one row for the attachment format picker.
+        attachmentFormatPickerView.itemSize = CGSize(square: attachmentFormatPickerView.height)
     }
 
     func checkPermissions(completion: @escaping () -> Void) {
         switch mediaLibraryAuthorizationStatus {
-        case .authorized:
+        case .authorized, .limited:
             showRecentPhotos()
         case .denied, .restricted:
             showRecentPhotosError()
@@ -183,28 +195,22 @@ class AttachmentKeyboard: CustomKeyboard {
             break
         }
 
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            attachmentFormatPickerView.startCameraPreview()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { granted in
-                if granted {
-                    DispatchQueue.main.async { self.attachmentFormatPickerView.startCameraPreview() }
-                }
-            }
-        case .denied, .restricted:
-            break
-        @unknown default:
-            break
-        }
-
         completion()
     }
 }
 
 extension AttachmentKeyboard: RecentPhotosDelegate {
     var isMediaLibraryAccessGranted: Bool {
-        return mediaLibraryAuthorizationStatus == .authorized
+        if #available(iOS 14, *) {
+            return [.authorized, .limited].contains(mediaLibraryAuthorizationStatus)
+        } else {
+            return mediaLibraryAuthorizationStatus == .authorized
+        }
+    }
+
+    var isMediaLibraryAccessLimited: Bool {
+        guard #available(iOS 14, *) else { return false }
+        return mediaLibraryAuthorizationStatus == .limited
     }
 
     func didSelectRecentPhoto(asset: PHAsset, attachment: SignalAttachment) {
@@ -213,8 +219,8 @@ extension AttachmentKeyboard: RecentPhotosDelegate {
 }
 
 extension AttachmentKeyboard: AttachmentFormatPickerDelegate {
-    func didTapCamera(withPhotoCapture photoCapture: PhotoCapture?) {
-        delegate?.didTapCamera(withPhotoCapture: photoCapture)
+    func didTapCamera() {
+        delegate?.didTapCamera()
     }
 
     func didTapGif() {
@@ -268,14 +274,14 @@ private class RecentPhotosErrorView: UIView {
 
         label.numberOfLines = 0
         label.lineBreakMode = .byWordWrapping
-        label.textColor = Theme.primaryColor
+        label.textColor = Theme.primaryTextColor
         label.font = .ows_dynamicTypeSubheadlineClamped
         label.textAlignment = .center
 
         stackView.addArrangedSubview(label)
 
         let button = OWSFlatButton()
-        button.setBackgroundColors(upColor: .ows_signalBlue)
+        button.setBackgroundColors(upColor: .ows_accentBlue)
         button.setTitle(title: CommonStrings.openSettingsButton, font: .ows_dynamicTypeBodyClamped, titleColor: .white)
         button.useDefaultCornerRadius()
         button.contentEdgeInsets = UIEdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8)

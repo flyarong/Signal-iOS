@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "DataSource.h"
@@ -21,39 +21,52 @@ typedef void (^OWSThumbnailFailure)(void);
 
 @interface TSAttachmentStream : TSAttachment
 
-- (instancetype)init NS_UNAVAILABLE;
-
 - (instancetype)initWithServerId:(UInt64)serverId
+                          cdnKey:(NSString *)cdnKey
+                       cdnNumber:(UInt32)cdnNumber
                    encryptionKey:(NSData *)encryptionKey
                        byteCount:(UInt32)byteCount
                      contentType:(NSString *)contentType
                   sourceFilename:(nullable NSString *)sourceFilename
                          caption:(nullable NSString *)caption
-                  albumMessageId:(nullable NSString *)albumMessageId NS_UNAVAILABLE;
-
+                  albumMessageId:(nullable NSString *)albumMessageId
+                        blurHash:(nullable NSString *)blurHash
+                 uploadTimestamp:(unsigned long long)uploadTimestamp NS_UNAVAILABLE;
 - (instancetype)initForRestoreWithUniqueId:(NSString *)uniqueId
                                contentType:(NSString *)contentType
                             sourceFilename:(nullable NSString *)sourceFilename
                                    caption:(nullable NSString *)caption
                             albumMessageId:(nullable NSString *)albumMessageId NS_UNAVAILABLE;
-
 - (instancetype)initAttachmentWithContentType:(NSString *)contentType
                                     byteCount:(UInt32)byteCount
                                sourceFilename:(nullable NSString *)sourceFilename
                                       caption:(nullable NSString *)caption
                                albumMessageId:(nullable NSString *)albumMessageId NS_UNAVAILABLE;
+- (instancetype)initWithGrdbId:(int64_t)grdbId
+                      uniqueId:(NSString *)uniqueId
+                albumMessageId:(nullable NSString *)albumMessageId
+                attachmentType:(TSAttachmentType)attachmentType
+                      blurHash:(nullable NSString *)blurHash
+                     byteCount:(unsigned int)byteCount
+                       caption:(nullable NSString *)caption
+                        cdnKey:(NSString *)cdnKey
+                     cdnNumber:(UInt32)cdnNumber
+                   contentType:(NSString *)contentType
+                 encryptionKey:(nullable NSData *)encryptionKey
+                      serverId:(unsigned long long)serverId
+                sourceFilename:(nullable NSString *)sourceFilename
+               uploadTimestamp:(unsigned long long)uploadTimestamp NS_UNAVAILABLE;
+
+- (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)initWithContentType:(NSString *)contentType
                           byteCount:(UInt32)byteCount
                      sourceFilename:(nullable NSString *)sourceFilename
                             caption:(nullable NSString *)caption
-                     albumMessageId:(nullable NSString *)albumMessageId
-                    shouldAlwaysPad:(BOOL)shouldAlwaysPad NS_DESIGNATED_INITIALIZER;
+                     albumMessageId:(nullable NSString *)albumMessageId NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)initWithPointer:(TSAttachmentPointer *)pointer
                     transaction:(SDSAnyReadTransaction *)transaction NS_DESIGNATED_INITIALIZER;
-
-- (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 // --- CODE GENERATION MARKER
 
@@ -61,28 +74,31 @@ typedef void (^OWSThumbnailFailure)(void);
 
 // clang-format off
 
-- (instancetype)initWithUniqueId:(NSString *)uniqueId
+- (instancetype)initWithGrdbId:(int64_t)grdbId
+                      uniqueId:(NSString *)uniqueId
                   albumMessageId:(nullable NSString *)albumMessageId
-         attachmentSchemaVersion:(NSUInteger)attachmentSchemaVersion
                   attachmentType:(TSAttachmentType)attachmentType
+                        blurHash:(nullable NSString *)blurHash
                        byteCount:(unsigned int)byteCount
                          caption:(nullable NSString *)caption
+                          cdnKey:(NSString *)cdnKey
+                       cdnNumber:(unsigned int)cdnNumber
                      contentType:(NSString *)contentType
                    encryptionKey:(nullable NSData *)encryptionKey
-                    isDownloaded:(BOOL)isDownloaded
                         serverId:(unsigned long long)serverId
                   sourceFilename:(nullable NSString *)sourceFilename
+                 uploadTimestamp:(unsigned long long)uploadTimestamp
       cachedAudioDurationSeconds:(nullable NSNumber *)cachedAudioDurationSeconds
                cachedImageHeight:(nullable NSNumber *)cachedImageHeight
                 cachedImageWidth:(nullable NSNumber *)cachedImageWidth
                creationTimestamp:(NSDate *)creationTimestamp
                           digest:(nullable NSData *)digest
+                isAnimatedCached:(nullable NSNumber *)isAnimatedCached
                       isUploaded:(BOOL)isUploaded
               isValidImageCached:(nullable NSNumber *)isValidImageCached
               isValidVideoCached:(nullable NSNumber *)isValidVideoCached
            localRelativeFilePath:(nullable NSString *)localRelativeFilePath
-                 shouldAlwaysPad:(BOOL)shouldAlwaysPad
-NS_SWIFT_NAME(init(uniqueId:albumMessageId:attachmentSchemaVersion:attachmentType:byteCount:caption:contentType:encryptionKey:isDownloaded:serverId:sourceFilename:cachedAudioDurationSeconds:cachedImageHeight:cachedImageWidth:creationTimestamp:digest:isUploaded:isValidImageCached:isValidVideoCached:localRelativeFilePath:shouldAlwaysPad:));
+NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:albumMessageId:attachmentType:blurHash:byteCount:caption:cdnKey:cdnNumber:contentType:encryptionKey:serverId:sourceFilename:uploadTimestamp:cachedAudioDurationSeconds:cachedImageHeight:cachedImageWidth:creationTimestamp:digest:isAnimatedCached:isUploaded:isValidImageCached:isValidVideoCached:localRelativeFilePath:));
 
 // clang-format on
 
@@ -105,6 +121,8 @@ NS_SWIFT_NAME(init(uniqueId:albumMessageId:attachmentSchemaVersion:attachmentTyp
 @property (nonatomic, readonly, nullable) NSString *originalFilePath;
 @property (nonatomic, readonly, nullable) NSURL *originalMediaURL;
 
+@property (nonatomic, readonly, nullable) NSString *audioWaveformPath;
+
 - (NSArray<NSString *> *)allSecondaryFilePaths;
 
 + (BOOL)hasThumbnailForMimeType:(NSString *)contentType;
@@ -122,7 +140,7 @@ NS_SWIFT_NAME(init(uniqueId:albumMessageId:attachmentSchemaVersion:attachmentTyp
 - (BOOL)writeConsumingDataSource:(id<DataSource>)dataSource
                            error:(NSError **)error NS_SWIFT_NAME(writeConsumingDataSource(_:));
 
-+ (void)deleteAttachments;
++ (void)deleteAttachmentsFromDisk;
 
 + (NSString *)attachmentsFolder;
 + (NSString *)legacyAttachmentsDirPath;
@@ -131,7 +149,7 @@ NS_SWIFT_NAME(init(uniqueId:albumMessageId:attachmentSchemaVersion:attachmentTyp
 - (BOOL)shouldHaveImageSize;
 - (CGSize)imageSize;
 
-- (CGFloat)audioDurationSeconds;
+- (NSTimeInterval)audioDurationSeconds;
 - (nullable AudioWaveform *)audioWaveform;
 
 + (nullable NSError *)migrateToSharedData;
@@ -154,21 +172,22 @@ NS_SWIFT_NAME(init(uniqueId:albumMessageId:attachmentSchemaVersion:attachmentTyp
 // This method should only be invoked by OWSThumbnailService.
 - (NSString *)pathForThumbnailDimensionPoints:(NSUInteger)thumbnailDimensionPoints;
 
-// When uploading, always apply adding to this attachment,
-// regardless of feature flags.
-@property (nonatomic, readonly) BOOL shouldAlwaysPad;
-
 #pragma mark - Validation
 
 @property (nonatomic, readonly) BOOL isValidImage;
 @property (nonatomic, readonly) BOOL isValidVideo;
 @property (nonatomic, readonly) BOOL isValidVisualMedia;
 
+@property (nonatomic, readonly) BOOL shouldBeRenderedByYY;
+
 #pragma mark - Update With... Methods
 
 - (void)updateAsUploadedWithEncryptionKey:(NSData *)encryptionKey
                                    digest:(NSData *)digest
                                  serverId:(UInt64)serverId
+                                   cdnKey:(NSString *)cdnKey
+                                cdnNumber:(UInt32)cdnNumber
+                          uploadTimestamp:(unsigned long long)uploadTimestamp
                               transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (nullable TSAttachmentStream *)cloneAsThumbnail;

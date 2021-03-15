@@ -1,15 +1,16 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSProvisioningMessage.h"
-#import "OWSProvisioningCipher.h"
 #import <AxolotlKit/NSData+keyVersionByte.h>
 #import <Curve25519Kit/Curve25519.h>
-#import <HKDFKit/HKDFKit.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+NSString *const OWSUserAgent = @"OWI";
+uint32_t const OWSProvisioningVersion = 1;
 
 @interface OWSProvisioningMessage ()
 
@@ -52,12 +53,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSData *)buildEncryptedMessageBody
 {
     ProvisioningProtoProvisionMessageBuilder *messageBuilder =
-        [ProvisioningProtoProvisionMessage builderWithIdentityKeyPublic:self.myPublicKey
+        [ProvisioningProtoProvisionMessage builderWithIdentityKeyPublic:[self.myPublicKey prependKeyType]
                                                      identityKeyPrivate:self.myPrivateKey
                                                        provisioningCode:self.provisioningCode
-                                                              userAgent:@"OWI"
-                                                             profileKey:self.profileKey
-                                                           readReceipts:self.areReadReceiptsEnabled];
+                                                             profileKey:self.profileKey];
+
+    messageBuilder.userAgent = OWSUserAgent;
+    messageBuilder.readReceipts = self.areReadReceiptsEnabled;
+    messageBuilder.provisioningVersion = OWSProvisioningVersion;
 
     NSString *_Nullable phoneNumber = self.accountAddress.phoneNumber;
     if (!phoneNumber) {

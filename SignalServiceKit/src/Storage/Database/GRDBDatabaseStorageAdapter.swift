@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -38,33 +38,38 @@ public class GRDBDatabaseStorageAdapter: NSObject {
         return storage.pool
     }
 
-    init(baseDir: URL) throws {
+    init(baseDir: URL) {
         databaseUrl = GRDBDatabaseStorageAdapter.databaseFileUrl(baseDir: baseDir)
 
-        try GRDBDatabaseStorageAdapter.ensureDatabaseKeySpecExists(baseDir: baseDir)
+        do {
+            // Crash if keychain is inaccessible.
+            try GRDBDatabaseStorageAdapter.ensureDatabaseKeySpecExists(baseDir: baseDir)
+        } catch {
+            owsFail("\(error.grdbErrorForLogging)")
+        }
 
-        storage = try GRDBStorage(dbURL: databaseUrl, keyspec: GRDBDatabaseStorageAdapter.keyspec)
+        do {
+            // Crash if storage can't be initialized.
+            storage = try GRDBStorage(dbURL: databaseUrl, keyspec: GRDBDatabaseStorageAdapter.keyspec)
+        } catch {
+            owsFail("\(error.grdbErrorForLogging)")
+        }
 
         super.init()
 
-        // Schema migrations are currently simple and fast. If they grow to become long-running,
-        // we'll want to ensure that it doesn't block app launch to avoid 0x8badfood.
-        try migrator.migrate(pool)
+        AppReadiness.runNowOrWhenAppWillBecomeReady { [weak self] in
+            // This adapter may have been discarded after running
+            // schema migrations.            
+            guard let self = self else { return }
 
-        AppReadiness.runNowOrWhenAppWillBecomeReady {
             BenchEventStart(title: "GRDB Setup", eventId: "GRDB Setup")
             defer { BenchEventComplete(eventId: "GRDB Setup") }
             do {
                 try self.setup()
-                try self.setupUIDatabase()
             } catch {
                 owsFail("unable to setup database: \(error)")
             }
         }
-    }
-
-    func newDatabaseQueue() -> GRDBDatabaseQueue {
-        return GRDBDatabaseQueue(storageAdapter: self)
     }
 
     public func add(function: DatabaseFunction) {
@@ -87,215 +92,14 @@ public class GRDBDatabaseStorageAdapter: NSObject {
         SignalRecipient.table,
         SignalAccount.table,
         OWSUserProfile.table,
-        TSRecipientReadReceipt.table,
-        OWSLinkedDeviceReadReceipt.table,
         OWSDevice.table,
-        OWSContactQuery.table,
-        TestModel.table
+        TestModel.table,
+        OWSReaction.table,
+        IncomingGroupsV2MessageJob.table,
+        TSMention.table
         // NOTE: We don't include OWSMessageDecryptJob,
         // since we should never use it with GRDB.
     ]
-
-    lazy var migrator: DatabaseMigrator = {
-        var migrator = DatabaseMigrator()
-        migrator.registerMigration("create initial schema") { db in
-
-            // Key-Value Stores
-            try SDSKeyValueStore.createTable(database: db)
-
-            for table in GRDBDatabaseStorageAdapter.tables {
-                try table.createTable(database: db)
-
-                guard nil != (table.columns.first { $0.columnName == "uniqueId" }) else {
-                    continue
-                }
-
-                let tableName = table.tableName
-                let indexName = "index_\(tableName)_on_uniqueId"
-                try db.create(index: indexName, on: tableName, columns: ["uniqueId"])
-            }
-
-            try db.create(index: "index_interactions_on_threadUniqueId_and_id",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.threadUniqueId),
-                            InteractionRecord.columnName(.id)
-                ])
-
-            // Durable Job Queue
-
-            try db.create(index: "index_jobs_on_label_and_id",
-                          on: JobRecordRecord.databaseTableName,
-                          columns: [JobRecordRecord.columnName(.label),
-                                    JobRecordRecord.columnName(.id)])
-
-            try db.create(index: "index_jobs_on_status_and_label_and_id",
-                          on: JobRecordRecord.databaseTableName,
-                          columns: [JobRecordRecord.columnName(.label),
-                                    JobRecordRecord.columnName(.status),
-                                    JobRecordRecord.columnName(.id)])
-
-            // View Once
-            try db.create(index: "index_interactions_on_view_once",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.isViewOnceMessage),
-                            InteractionRecord.columnName(.isViewOnceComplete)
-                ])
-            try db.create(index: "index_key_value_store_on_collection_and_key",
-                          on: SDSKeyValueStore.table.tableName,
-                          columns: [
-                            SDSKeyValueStore.collectionColumn.columnName,
-                            SDSKeyValueStore.keyColumn.columnName
-                ])
-            try db.create(index: "index_interactions_on_recordType_and_threadUniqueId_and_errorType",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.recordType),
-                            InteractionRecord.columnName(.threadUniqueId),
-                            InteractionRecord.columnName(.errorType)
-                ])
-
-            // Media Gallery Indices
-            try db.create(index: "index_attachments_on_albumMessageId",
-                          on: AttachmentRecord.databaseTableName,
-                          columns: [AttachmentRecord.columnName(.albumMessageId),
-                                    AttachmentRecord.columnName(.recordType)])
-
-            try db.create(index: "index_interactions_on_uniqueId_and_threadUniqueId",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.threadUniqueId),
-                            InteractionRecord.columnName(.uniqueId)
-                ])
-
-            // Signal Account Indices
-            try db.create(
-                index: "index_signal_accounts_on_recipientPhoneNumber",
-                on: SignalAccountRecord.databaseTableName,
-                columns: [SignalAccountRecord.columnName(.recipientPhoneNumber)]
-            )
-
-            try db.create(
-                index: "index_signal_accounts_on_recipientUUID",
-                on: SignalAccountRecord.databaseTableName,
-                columns: [SignalAccountRecord.columnName(.recipientUUID)]
-            )
-
-            // Signal Recipient Indices
-            try db.create(
-                index: "index_signal_recipients_on_recipientPhoneNumber",
-                on: SignalRecipientRecord.databaseTableName,
-                columns: [SignalRecipientRecord.columnName(.recipientPhoneNumber)]
-            )
-
-            try db.create(
-                index: "index_signal_recipients_on_recipientUUID",
-                on: SignalRecipientRecord.databaseTableName,
-                columns: [SignalRecipientRecord.columnName(.recipientUUID)]
-            )
-
-            // Thread Indices
-            try db.create(
-                index: "index_thread_on_contactPhoneNumber",
-                on: ThreadRecord.databaseTableName,
-                columns: [ThreadRecord.columnName(.contactPhoneNumber)]
-            )
-
-            try db.create(
-                index: "index_thread_on_contactUUID",
-                on: ThreadRecord.databaseTableName,
-                columns: [ThreadRecord.columnName(.contactUUID)]
-            )
-
-            // User Profile
-            try db.create(
-                index: "index_user_profiles_on_recipientPhoneNumber",
-                on: UserProfileRecord.databaseTableName,
-                columns: [UserProfileRecord.columnName(.recipientPhoneNumber)]
-            )
-
-            try db.create(
-                index: "index_user_profiles_on_recipientUUID",
-                on: UserProfileRecord.databaseTableName,
-                columns: [UserProfileRecord.columnName(.recipientUUID)]
-            )
-
-            try db.create(
-                index: "index_user_profiles_on_username",
-                on: UserProfileRecord.databaseTableName,
-                columns: [UserProfileRecord.columnName(.username)]
-            )
-
-            // Linked Device Read Receipts
-            try db.create(
-                index: "index_linkedDeviceReadReceipt_on_senderPhoneNumberAndTimestamp",
-                on: LinkedDeviceReadReceiptRecord.databaseTableName,
-                columns: [LinkedDeviceReadReceiptRecord.columnName(.senderPhoneNumber), LinkedDeviceReadReceiptRecord.columnName(.messageIdTimestamp)]
-            )
-
-            try db.create(
-                index: "index_linkedDeviceReadReceipt_on_senderUUIDAndTimestamp",
-                on: LinkedDeviceReadReceiptRecord.databaseTableName,
-                columns: [LinkedDeviceReadReceiptRecord.columnName(.senderUUID), LinkedDeviceReadReceiptRecord.columnName(.messageIdTimestamp)]
-            )
-
-            // Interaction Finder
-            try db.create(index: "index_interactions_on_timestamp_sourceDeviceId_and_authorUUID",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.timestamp),
-                            InteractionRecord.columnName(.sourceDeviceId),
-                            InteractionRecord.columnName(.authorUUID)
-                ])
-
-            try db.create(index: "index_interactions_on_timestamp_sourceDeviceId_and_authorPhoneNumber",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.timestamp),
-                            InteractionRecord.columnName(.sourceDeviceId),
-                            InteractionRecord.columnName(.authorPhoneNumber)
-                ])
-            try db.create(index: "index_interactions_on_threadUniqueId_and_read",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.threadUniqueId),
-                            InteractionRecord.columnName(.read)
-                ])
-
-            // Disappearing Messages
-            try db.create(index: "index_interactions_on_expiresInSeconds_and_expiresAt",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.expiresAt),
-                            InteractionRecord.columnName(.expiresInSeconds)
-                ])
-            try db.create(index: "index_interactions_on_threadUniqueId_storedShouldStartExpireTimer_and_expiresAt",
-                          on: InteractionRecord.databaseTableName,
-                          columns: [
-                            InteractionRecord.columnName(.expiresAt),
-                            InteractionRecord.columnName(.storedShouldStartExpireTimer),
-                            InteractionRecord.columnName(.threadUniqueId)
-                ])
-
-            // ContactQuery
-            try db.create(index: "index_contact_queries_on_lastQueried",
-                          on: ContactQueryRecord.databaseTableName,
-                          columns: [
-                            ContactQueryRecord.columnName(.lastQueried)
-                ])
-
-            // Backup
-            try db.create(index: "index_attachments_on_lazyRestoreFragmentId",
-                          on: AttachmentRecord.databaseTableName,
-                          columns: [
-                            AttachmentRecord.columnName(.lazyRestoreFragmentId)
-                ])
-
-            try GRDBFullTextSearchFinder.createTables(database: db)
-        }
-        return migrator
-    }()
 
     // MARK: - Database Snapshot
 
@@ -307,55 +111,25 @@ public class GRDBDatabaseStorageAdapter: NSObject {
     public private(set) var uiDatabaseObserver: UIDatabaseObserver?
 
     @objc
-    public private(set) var homeViewDatabaseObserver: HomeViewDatabaseObserver?
-
-    @objc
-    public private(set) var conversationViewDatabaseObserver: ConversationViewDatabaseObserver?
-
-    @objc
-    public private(set) var mediaGalleryDatabaseObserver: MediaGalleryDatabaseObserver?
-
-    @objc
-    public private(set) var genericDatabaseObserver: GRDBGenericDatabaseObserver?
-
-    @objc
     public func setupUIDatabase() throws {
+        owsAssertDebug(self.uiDatabaseObserver == nil)
+
         // UIDatabaseObserver is a general purpose observer, whose delegates
         // are notified when things change, but are not given any specific details
         // about the changes.
-        let uiDatabaseObserver = try UIDatabaseObserver(pool: pool)
+        let uiDatabaseObserver = try UIDatabaseObserver(pool: pool,
+                                                        checkpointingQueue: storage.checkpointingQueue)
         self.uiDatabaseObserver = uiDatabaseObserver
-
-        // HomeViewDatabaseObserver is built on top of UIDatabaseObserver
-        // but includes the details necessary for rendering collection view
-        // batch updates.
-        let homeViewDatabaseObserver = HomeViewDatabaseObserver()
-        self.homeViewDatabaseObserver = homeViewDatabaseObserver
-        uiDatabaseObserver.appendSnapshotDelegate(homeViewDatabaseObserver)
-
-        // ConversationViewDatabaseObserver is built on top of UIDatabaseObserver
-        // but includes the details necessary for rendering collection view
-        // batch updates.
-        let conversationViewDatabaseObserver = ConversationViewDatabaseObserver()
-        self.conversationViewDatabaseObserver = conversationViewDatabaseObserver
-        uiDatabaseObserver.appendSnapshotDelegate(conversationViewDatabaseObserver)
-
-        // MediaGalleryDatabaseObserver is built on top of UIDatabaseObserver
-        // but includes the details necessary for rendering collection view
-        // batch updates.
-        let mediaGalleryDatabaseObserver = MediaGalleryDatabaseObserver()
-        self.mediaGalleryDatabaseObserver = mediaGalleryDatabaseObserver
-        uiDatabaseObserver.appendSnapshotDelegate(mediaGalleryDatabaseObserver)
-
-        let genericDatabaseObserver = GRDBGenericDatabaseObserver()
-        self.genericDatabaseObserver = genericDatabaseObserver
-        uiDatabaseObserver.appendSnapshotDelegate(genericDatabaseObserver)
 
         try pool.write { db in
             db.add(transactionObserver: uiDatabaseObserver, extent: Database.TransactionObservationExtent.observerLifetime)
         }
+    }
 
-        SDSDatabaseStorage.shared.observation.set(grdbStorage: self)
+    // NOTE: This should only be used in exceptional circumstances,
+    // e.g. after reloading the database due to a device transfer.
+    func forceUpdateSnapshot() {
+        uiDatabaseObserver?.forceUpdateSnapshot()
     }
 
     func testing_tearDownUIDatabase() {
@@ -363,21 +137,18 @@ public class GRDBDatabaseStorageAdapter: NSObject {
         // are notified when things change, but are not given any specific details
         // about the changes.
         self.uiDatabaseObserver = nil
-        self.homeViewDatabaseObserver = nil
-        self.conversationViewDatabaseObserver = nil
-        self.mediaGalleryDatabaseObserver = nil
-        self.genericDatabaseObserver = nil
     }
 
     func setup() throws {
-        GRDBMediaGalleryFinder.setup(storage: self)
+        MediaGalleryManager.setup(storage: self)
+        try setupUIDatabase()
     }
 
     // MARK: -
 
     private static let keyServiceName: String = "GRDBKeyChainService"
     private static let keyName: String = "GRDBDatabaseCipherKeySpec"
-    private static var keyspec: GRDBKeySpecSource {
+    public static var keyspec: GRDBKeySpecSource {
         return GRDBKeySpecSource(keyServiceName: keyServiceName, keyName: keyName)
     }
 
@@ -389,6 +160,15 @@ public class GRDBDatabaseStorageAdapter: NSObject {
             owsFailDebug("Key not accessible: \(error)")
             return false
         }
+    }
+
+    /// Fetches the GRDB key data from the keychain.
+    /// - Note: Will fatally assert if not running in a debug or test build.
+    /// - Returns: The key data, if available.
+    @objc
+    public static var debugOnly_keyData: Data? {
+        owsAssert(OWSIsTestableBuild())
+        return try? keyspec.fetchData()
     }
 
     @objc
@@ -451,10 +231,8 @@ public class GRDBDatabaseStorageAdapter: NSObject {
 
         deleteDBKeys()
 
-        KeyBackupService.clearKeychain()
-
-        if (CurrentAppContext().isMainApp) {
-            TSAttachmentStream.deleteAttachments()
+        if CurrentAppContext().isMainApp {
+            TSAttachmentStream.deleteAttachmentsFromDisk()
         }
 
         // TODO: Delete Profiles on Disk?
@@ -472,11 +250,32 @@ public class GRDBDatabaseStorageAdapter: NSObject {
 // MARK: -
 
 extension GRDBDatabaseStorageAdapter: SDSDatabaseStorageAdapter {
+
+    #if TESTABLE_BUILD
+    // TODO: We could eventually eliminate all nested transactions.
+    private static let detectNestedTransactions = false
+
+    // In debug builds, we can detect transactions opened within transaction.
+    // These checks can also be used to detect unexpected "sneaky" transactions.
+    private static let kCanOpenTransactionKey = "kCanOpenTransactionKey"
+    public static func setCanOpenTransaction(_ value: Bool) {
+        Thread.current.threadDictionary[kCanOpenTransactionKey] = NSNumber(value: value)
+    }
+    private static var canOpenTransaction: Bool {
+        guard let value = Thread.current.threadDictionary[kCanOpenTransactionKey] as? NSNumber else {
+            return true
+        }
+        return value.boolValue
+    }
+    #endif
+
     private func assertCanRead() {
         if !databaseStorage.canReadFromGrdb {
-            Logger.error("storageMode: \(FeatureFlags.storageMode).")
+            Logger.error("storageMode: \(FeatureFlags.storageModeDescription).")
             Logger.error(
                 "StorageCoordinatorState: \(NSStringFromStorageCoordinatorState(storageCoordinator.state)).")
+            Logger.error(
+                "dataStoreForUI: \(NSStringForDataStore(StorageCoordinator.dataStoreForUI)).")
 
             switch FeatureFlags.storageModeStrictness {
             case .fail:
@@ -490,53 +289,136 @@ extension GRDBDatabaseStorageAdapter: SDSDatabaseStorageAdapter {
     }
 
     // TODO readThrows/writeThrows flavors
-    public func uiReadThrows(block: @escaping (GRDBReadTransaction) throws -> Void) rethrows {
+    public func uiReadThrows(block: (GRDBReadTransaction) throws -> Void) rethrows {
         assertCanRead()
+
+        #if TESTABLE_BUILD
+        owsAssertDebug(Self.canOpenTransaction)
+        // Check for nested tractions.
+        if Self.detectNestedTransactions {
+            // Check for nested tractions.
+            Self.setCanOpenTransaction(false)
+        }
+        defer {
+            if Self.detectNestedTransactions {
+                Self.setCanOpenTransaction(true)
+            }
+        }
+        #endif
+
         AssertIsOnMainThread()
         try latestSnapshot.read { database in
             try autoreleasepool {
-                try block(GRDBReadTransaction(database: database))
+                try block(GRDBReadTransaction(database: database, isUIRead: true))
             }
         }
     }
 
-    public func readReturningResultThrows<T>(block: @escaping (GRDBReadTransaction) throws -> T) throws -> T {
+    @discardableResult
+    public func read<T>(block: (GRDBReadTransaction) throws -> T) throws -> T {
         assertCanRead()
-        AssertIsOnMainThread()
+
+        #if TESTABLE_BUILD
+        owsAssertDebug(Self.canOpenTransaction)
+        // Check for nested tractions.
+        if Self.detectNestedTransactions {
+            // Check for nested tractions.
+            Self.setCanOpenTransaction(false)
+        }
+        defer {
+            if Self.detectNestedTransactions {
+                Self.setCanOpenTransaction(true)
+            }
+        }
+        #endif
+
         return try pool.read { database in
             try autoreleasepool {
-                return try block(GRDBReadTransaction(database: database))
+                return try block(GRDBReadTransaction(database: database, isUIRead: false))
             }
         }
     }
 
+    @discardableResult
+    public func write<T>(block: (GRDBWriteTransaction) throws -> T) throws -> T {
+
+        var value: T!
+        var thrown: Error?
+        try write { (transaction) in
+            do {
+                value = try block(transaction)
+            } catch {
+                thrown = error
+            }
+        }
+        if let error = thrown {
+            throw error.grdbErrorForLogging
+        }
+        return value
+    }
+
     @objc
-    public func uiRead(block: @escaping (GRDBReadTransaction) -> Void) throws {
+    public func uiRead(block: (GRDBReadTransaction) -> Void) throws {
         assertCanRead()
         AssertIsOnMainThread()
+
+        #if TESTABLE_BUILD
+        owsAssertDebug(Self.canOpenTransaction)
+        // Check for nested tractions.
+        if Self.detectNestedTransactions {
+            // Check for nested tractions.
+            Self.setCanOpenTransaction(false)
+        }
+        defer {
+            if Self.detectNestedTransactions {
+                Self.setCanOpenTransaction(true)
+            }
+        }
+        #endif
+
+        guard CurrentAppContext().hasUI else {
+            // Never do uiReads in the NSE.
+            return try read(block: block)
+        }
+
         latestSnapshot.read { database in
             autoreleasepool {
-                block(GRDBReadTransaction(database: database))
+                block(GRDBReadTransaction(database: database, isUIRead: true))
             }
         }
     }
 
     @objc
-    public func read(block: @escaping (GRDBReadTransaction) -> Void) throws {
+    public func read(block: (GRDBReadTransaction) -> Void) throws {
         assertCanRead()
+
+        #if TESTABLE_BUILD
+        owsAssertDebug(Self.canOpenTransaction)
+        if Self.detectNestedTransactions {
+            // Check for nested tractions.
+            Self.setCanOpenTransaction(false)
+        }
+        defer {
+            if Self.detectNestedTransactions {
+                Self.setCanOpenTransaction(true)
+            }
+        }
+        #endif
+
         try pool.read { database in
             autoreleasepool {
-                block(GRDBReadTransaction(database: database))
+                block(GRDBReadTransaction(database: database, isUIRead: false))
             }
         }
     }
 
-    @objc
-    public func write(block: @escaping (GRDBWriteTransaction) -> Void) throws {
+    private func assertCanWrite() {
         if !databaseStorage.canWriteToGrdb {
-            Logger.error("storageMode: \(FeatureFlags.storageMode).")
+            Logger.error("storageMode: \(FeatureFlags.storageModeDescription).")
             Logger.error(
                 "StorageCoordinatorState: \(NSStringFromStorageCoordinatorState(storageCoordinator.state)).")
+            Logger.error(
+                "dataStoreForUI: \(NSStringForDataStore(StorageCoordinator.dataStoreForUI)).")
 
             switch FeatureFlags.storageModeStrictness {
             case .fail:
@@ -547,18 +429,69 @@ extension GRDBDatabaseStorageAdapter: SDSDatabaseStorageAdapter {
                 Logger.error("Unexpected GRDB write.")
             }
         }
+    }
 
-        var transaction: GRDBWriteTransaction!
-        try pool.write { database in
-            autoreleasepool {
-                transaction = GRDBWriteTransaction(database: database)
-                block(transaction)
+    @objc
+    public func write(block: (GRDBWriteTransaction) -> Void) throws {
+        assertCanWrite()
+
+        #if TESTABLE_BUILD
+        owsAssertDebug(Self.canOpenTransaction)
+        // Check for nested tractions.
+        if Self.detectNestedTransactions {
+            // Check for nested tractions.
+            Self.setCanOpenTransaction(false)
+        }
+        defer {
+            if Self.detectNestedTransactions {
+                Self.setCanOpenTransaction(true)
             }
         }
-        for (queue, block) in transaction.completions {
-            queue.async(execute: block)
+        #endif
+
+        var syncCompletions: [GRDBWriteTransaction.CompletionBlock] = []
+        var asyncCompletions: [GRDBWriteTransaction.AsyncCompletion] = []
+
+        try pool.write { database in
+            autoreleasepool {
+                let transaction = GRDBWriteTransaction(database: database)
+                block(transaction)
+                transaction.finalizeTransaction()
+
+                syncCompletions = transaction.syncCompletions
+                asyncCompletions = transaction.asyncCompletions
+            }
+        }
+
+        // Perform all completions _after_ the write transaction completes.
+        for block in syncCompletions {
+            block()
+        }
+
+        for asyncCompletion in asyncCompletions {
+            asyncCompletion.queue.async(execute: asyncCompletion.block)
         }
     }
+}
+
+// MARK: -
+
+func filterForDBQueryLog(_ input: String) -> String {
+    var result = input
+    while let matchRange = result.range(of: "x'[0-9a-f\n]*'", options: .regularExpression) {
+        let charCount = result.distance(from: matchRange.lowerBound, to: matchRange.upperBound)
+        let byteCount = Int64(charCount) / 2
+        let formattedByteCount = ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .memory)
+        result = result.replacingCharacters(in: matchRange, with: "x'<\(formattedByteCount)>'")
+    }
+    return result
+}
+
+private func dbQueryLog(_ value: String) {
+    guard SDSDatabaseStorage.shouldLogDBQueries else {
+        return
+    }
+    Logger.info(filterForDBQueryLog(value))
 }
 
 // MARK: -
@@ -567,52 +500,84 @@ private struct GRDBStorage {
 
     let pool: DatabasePool
 
+    let checkpointingQueue: DatabaseQueue?
+
     private let dbURL: URL
-    private let configuration: Configuration
+    private let poolConfiguration: Configuration
+    private let checkpointingQueueConfiguration: Configuration
+
+    fileprivate static let maxBusyTimeoutMs = 50
 
     init(dbURL: URL, keyspec: GRDBKeySpecSource) throws {
         self.dbURL = dbURL
 
+        poolConfiguration = Self.buildConfiguration(keyspec: keyspec,
+                                               isForCheckpointingQueue: false)
+        checkpointingQueueConfiguration = Self.buildConfiguration(keyspec: keyspec,
+                                                                  isForCheckpointingQueue: true)
+
+        pool = try DatabasePool(path: dbURL.path, configuration: poolConfiguration)
+        Logger.debug("dbURL: \(dbURL)")
+
+        let shouldCheckpoint = CurrentAppContext().isMainApp
+        if shouldCheckpoint {
+            checkpointingQueue = try DatabaseQueue(path: dbURL.path,
+                                                   configuration: checkpointingQueueConfiguration)
+        } else {
+            checkpointingQueue = nil
+        }
+
+        OWSFileSystem.protectFileOrFolder(atPath: dbURL.path)
+    }
+
+    private static func buildConfiguration(keyspec: GRDBKeySpecSource,
+                                           isForCheckpointingQueue: Bool) -> Configuration {
         var configuration = Configuration()
         configuration.readonly = false
         configuration.foreignKeysEnabled = true // Default is already true
-        configuration.trace = {
-            if SDSDatabaseStorage.shouldLogDBQueries {
-                print($0)  // Prints all SQL statements
-            }
+        configuration.trace = { logString in
+            dbQueryLog(logString)
         }
-        configuration.label = "Modern (GRDB) Storage"      // Useful when your app opens multiple databases
+        // Useful when your app opens multiple databases
+        configuration.label = (isForCheckpointingQueue
+            ? "GRDB Checkpointing"
+            : "GRDB Storage")
         configuration.maximumReaderCount = 10   // The default is 5
         configuration.busyMode = .callback({ (retryCount: Int) -> Bool in
-            // sleep 50 milliseconds
-            let millis = 50
+            // sleep N milliseconds
+            let millis = 25
             usleep(useconds_t(millis * 1000))
-
             Logger.verbose("retryCount: \(retryCount)")
-            let accumulatedWait = millis * (retryCount + 1)
-            if accumulatedWait > 0, (accumulatedWait % 250) == 0 {
-                Logger.warn("Database busy for \(accumulatedWait)ms")
+            let accumulatedWaitMs = millis * (retryCount + 1)
+            if accumulatedWaitMs > 0, (accumulatedWaitMs % 250) == 0 {
+                Logger.warn("Database busy for \(accumulatedWaitMs)ms")
             }
 
-            return true
+            if isForCheckpointingQueue {
+                // The checkpointing queue should time out.
+                if accumulatedWaitMs > GRDBStorage.maxBusyTimeoutMs {
+                    Logger.warn("Aborting busy retry.")
+                    return false
+                }
+                return true
+            } else {
+                return true
+            }
         })
         configuration.prepareDatabase = { (db: Database) in
             let keyspec = try keyspec.fetchString()
             try db.execute(sql: "PRAGMA key = \"\(keyspec)\"")
             try db.execute(sql: "PRAGMA cipher_plaintext_header_size = 32")
         }
-        self.configuration = configuration
-
-        pool = try DatabasePool(path: dbURL.path, configuration: configuration)
-        Logger.debug("dbURL: \(dbURL)")
-
-        OWSFileSystem.protectFileOrFolder(atPath: dbURL.path)
+        configuration.defaultTransactionKind = .immediate
+        configuration.allowsUnsafeTransactions = true
+        return configuration
     }
 }
 
 // MARK: -
 
-private struct GRDBKeySpecSource {
+public struct GRDBKeySpecSource {
     // 256 bit key + 128 bit salt
     private let kSQLCipherKeySpecLength: UInt = 48
 
@@ -635,7 +600,7 @@ private struct GRDBKeySpecSource {
         return passphrase
     }
 
-    func fetchData() throws -> Data {
+    public func fetchData() throws -> Data {
         return try CurrentAppContext().keychainStorage().data(forService: keyServiceName, key: keyName)
     }
 
@@ -656,7 +621,7 @@ private struct GRDBKeySpecSource {
         }
     }
 
-    func store(data: Data) throws {
+    public func store(data: Data) throws {
         guard data.count == kSQLCipherKeySpecLength else {
             owsFail("unexpected keyspec length")
         }
@@ -666,48 +631,16 @@ private struct GRDBKeySpecSource {
 
 // MARK: -
 
-@objc
-public extension SDSDatabaseStorage {
-    var databaseFileSize: UInt64 {
-        switch dataStoreForReporting {
-        case .grdb:
-            return grdbStorage.databaseFileSize
-        case .ydb:
-            return OWSPrimaryStorage.shared?.databaseFileSize() ?? 0
-        }
-    }
-
-    var databaseWALFileSize: UInt64 {
-        switch dataStoreForReporting {
-        case .grdb:
-            return grdbStorage.databaseWALFileSize
-        case .ydb:
-            return OWSPrimaryStorage.shared?.databaseWALFileSize() ?? 0
-        }
-    }
-
-    var databaseSHMFileSize: UInt64 {
-        switch dataStoreForReporting {
-        case .grdb:
-            return grdbStorage.databaseSHMFileSize
-        case .ydb:
-            return OWSPrimaryStorage.shared?.databaseSHMFileSize() ?? 0
-        }
-    }
-}
-
-// MARK: -
-
 extension GRDBDatabaseStorageAdapter {
-    var databaseFilePath: String {
+    public var databaseFilePath: String {
         return databaseUrl.path
     }
 
-    var databaseWALFilePath: String {
+    public var databaseWALFilePath: String {
         return databaseUrl.path + "-wal"
     }
 
-    var databaseSHMFilePath: String {
+    public var databaseSHMFilePath: String {
         return databaseUrl.path + "-shm"
     }
 
@@ -744,5 +677,91 @@ extension GRDBDatabaseStorageAdapter {
             return 0
         }
         return fileSize.uint64Value
+    }
+}
+
+// MARK: - Checkpoints
+
+public struct GrdbTruncationResult {
+    let walSizePages: Int32
+    let pagesCheckpointed: Int32
+}
+
+extension GRDBDatabaseStorageAdapter {
+    @objc
+    public func syncTruncatingCheckpoint() throws {
+        guard let checkpointingQueue = storage.checkpointingQueue else {
+            return
+        }
+
+        Logger.info("running truncating checkpoint.")
+
+        SDSDatabaseStorage.shared.logFileSizes()
+
+        let result = try GRDBDatabaseStorageAdapter.checkpoint(checkpointingQueue: checkpointingQueue,
+                                                               mode: .truncate)
+
+        Logger.info("walSizePages: \(result.walSizePages), pagesCheckpointed: \(result.pagesCheckpointed)")
+
+        SDSDatabaseStorage.shared.logFileSizes()
+    }
+
+    public static func checkpoint(checkpointingQueue: DatabaseQueue,
+                                  mode: Database.CheckpointMode) throws -> GrdbTruncationResult {
+
+        var walSizePages: Int32 = 0
+        var pagesCheckpointed: Int32 = 0
+        try Bench(title: "Slow checkpoint: \(mode)", logIfLongerThan: 0.01, logInProduction: true) {
+            #if TESTABLE_BUILD
+            let startTime = CACurrentMediaTime()
+            #endif
+            try checkpointingQueue.inDatabase { db in
+                #if TESTABLE_BUILD
+                let startElapsedSeconds: TimeInterval = CACurrentMediaTime() - startTime
+                let slowStartSeconds: TimeInterval = TimeInterval(GRDBStorage.maxBusyTimeoutMs) / 1000
+                if startElapsedSeconds > slowStartSeconds * 2 {
+                    // maxBusyTimeoutMs isn't a hard limit, but slow starts should be very rare.
+                    let formattedTime = String(format: "%0.2fms", startElapsedSeconds * 1000)
+                    owsFailDebug("Slow checkpoint start: \(formattedTime)")
+                }
+                #endif
+
+                let code = sqlite3_wal_checkpoint_v2(db.sqliteConnection, nil, mode.rawValue, &walSizePages, &pagesCheckpointed)
+                switch code {
+                case SQLITE_OK:
+                    if mode != .passive {
+                        Logger.info("Checkpoint succeeded: \(mode).")
+                    }
+                    break
+                case SQLITE_BUSY:
+                    // Busy is not an error.
+                    Logger.info("Checkpoint \(mode) failed due to busy.")
+                    break
+                default:
+                    throw OWSAssertionError("checkpoint sql error with code: \(code)")
+                }
+            }
+        }
+        return GrdbTruncationResult(walSizePages: walSizePages, pagesCheckpointed: pagesCheckpointed)
+    }
+}
+
+// MARK: -
+
+public extension Error {
+    var grdbErrorForLogging: Error {
+        // If not a GRDB error, return unmodified.
+        guard let grdbError = self as? GRDB.DatabaseError else {
+            return self
+        }
+        // DatabaseError.description includes the arguments.
+        Logger.verbose("grdbError: \(grdbError))")
+        // DatabaseError.description does not include the extendedResultCode.
+        Logger.verbose("resultCode: \(grdbError.resultCode), extendedResultCode: \(grdbError.extendedResultCode), message: \(String(describing: grdbError.message)), sql: \(String(describing: grdbError.sql))")
+        let error = GRDB.DatabaseError(resultCode: grdbError.extendedResultCode,
+                                       message: grdbError.message,
+                                       sql: nil,
+                                       arguments: nil)
+        return error
     }
 }

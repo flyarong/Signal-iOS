@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -20,12 +20,12 @@ public protocol AttachmentApprovalViewControllerDelegate: class {
     func attachmentApprovalDidAppear(_ attachmentApproval: AttachmentApprovalViewController)
 
     func attachmentApproval(_ attachmentApproval: AttachmentApprovalViewController,
-                            didApproveAttachments attachments: [SignalAttachment], messageText: String?)
+                            didApproveAttachments attachments: [SignalAttachment], messageBody: MessageBody?)
 
     func attachmentApprovalDidCancel(_ attachmentApproval: AttachmentApprovalViewController)
 
     func attachmentApproval(_ attachmentApproval: AttachmentApprovalViewController,
-                            didChangeMessageText newMessageText: String?)
+                            didChangeMessageBody newMessageBody: MessageBody?)
 
     @objc
     optional func attachmentApproval(_ attachmentApproval: AttachmentApprovalViewController, didRemoveAttachment attachment: SignalAttachment)
@@ -35,6 +35,12 @@ public protocol AttachmentApprovalViewControllerDelegate: class {
 
     @objc
     optional func attachmentApprovalBackButtonTitle() -> String
+
+    @objc var attachmentApprovalTextInputContextIdentifier: String? { get }
+
+    @objc var attachmentApprovalRecipientNames: [String] { get }
+
+    @objc var attachmentApprovalMentionableAddresses: [SignalServiceAddress] { get }
 }
 
 // MARK: -
@@ -56,12 +62,6 @@ public struct AttachmentApprovalViewControllerOptions: OptionSet {
 @objc
 public class AttachmentApprovalViewController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
 
-    // MARK: - Dependencies
-
-    private var preferences: OWSPreferences {
-        return Environment.shared.preferences
-    }
-
     // MARK: - Properties
 
     private let receivedOptions: AttachmentApprovalViewControllerOptions
@@ -69,8 +69,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
     private var options: AttachmentApprovalViewControllerOptions {
         var options = receivedOptions
 
-        if FeatureFlags.viewOnceSending,
-            attachmentApprovalItemCollection.attachmentApprovalItems.count == 1,
+        if attachmentApprovalItemCollection.attachmentApprovalItems.count == 1,
             let firstItem = attachmentApprovalItemCollection.attachmentApprovalItems.first,
             firstItem.attachment.isValidImage || firstItem.attachment.isValidVideo {
             options.insert(.canToggleViewOnce)
@@ -80,8 +79,10 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
     }
 
     var isAddMoreVisible: Bool {
-        return options.contains(.canAddMore) && !preferences.isViewOnceMessagesEnabled()
+        return options.contains(.canAddMore) && !isViewOnceEnabled
     }
+
+    var isViewOnceEnabled = false
 
     public weak var approvalDelegate: AttachmentApprovalViewControllerDelegate?
 
@@ -105,12 +106,14 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
                          attachmentApprovalItems: [AttachmentApprovalItem]) {
         assert(attachmentApprovalItems.count > 0)
         self.receivedOptions = options
-        self.bottomToolView = AttachmentApprovalInputAccessoryView(options: options, sendButtonImageName: sendButtonImageName)
+        self.bottomToolView = AttachmentApprovalToolbar(options: options, sendButtonImageName: sendButtonImageName)
 
         let pageOptions: [UIPageViewController.OptionsKey: Any] = [.interPageSpacing: kSpacingBetweenItems]
         super.init(transitionStyle: .scroll,
                    navigationOrientation: .horizontal,
                    options: pageOptions)
+
+        attachmentTextToolbar.attachmentTextToolbarDelegate = self
 
         let isAddMoreVisibleBlock = { [weak self] in
             return self?.isAddMoreVisible ?? false
@@ -122,7 +125,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
 
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(didBecomeActive),
-                                               name: NSNotification.Name.OWSApplicationDidBecomeActive,
+                                               name: .OWSApplicationDidBecomeActive,
                                                object: nil)
     }
 
@@ -132,6 +135,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
 
     @objc
     public class func wrappedInNavController(attachments: [SignalAttachment],
+                                             initialMessageBody: MessageBody?,
                                              approvalDelegate: AttachmentApprovalViewControllerDelegate)
         -> OWSNavigationController {
 
@@ -139,6 +143,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
         let vc = AttachmentApprovalViewController(options: [.hasCancel],
                                                   sendButtonImageName: "send-solid-24",
                                                   attachmentApprovalItems: attachmentApprovalItems)
+        vc.messageBody = initialMessageBody
         vc.approvalDelegate = approvalDelegate
         let navController = OWSNavigationController(rootViewController: vc)
         navController.ows_prefersStatusBarHidden = true
@@ -147,7 +152,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
             owsFailDebug("navigationBar was nil or unexpected class")
             return navController
         }
-        navigationBar.overrideTheme(type: .clear)
+        navigationBar.switchToStyle(.alwaysDarkAndClear)
 
         return navController
     }
@@ -170,14 +175,22 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
         return bottomToolView.attachmentTextToolbar
     }
 
-    let bottomToolView: AttachmentApprovalInputAccessoryView
+    let bottomToolView: AttachmentApprovalToolbar
+    private var bottomToolViewBottomConstraint: NSLayoutConstraint?
+
+    private lazy var inputAccessoryPlaceholder: InputAccessoryViewPlaceholder = {
+        let placeholder = InputAccessoryViewPlaceholder()
+        placeholder.delegate = self
+        placeholder.referenceView = view
+        return placeholder
+    }()
 
     lazy var touchInterceptorView = UIView()
 
     // MARK: - View Lifecycle
 
     public override var prefersStatusBarHidden: Bool {
-        guard !OWSWindowManager.shared().hasCall() else {
+        guard !OWSWindowManager.shared.hasCall else {
             return false
         }
 
@@ -194,7 +207,6 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
 
         // Bottom Toolbar
         galleryRailView.delegate = self
-        attachmentTextToolbar.attachmentTextToolbarDelegate = self
 
         // Navigation
 
@@ -215,17 +227,23 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
         touchInterceptorView.isHidden = true
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(didTapTouchInterceptorView(gesture:)))
         touchInterceptorView.addGestureRecognizer(tapGesture)
+
+        view.addSubview(bottomToolView)
+        bottomToolView.autoPinWidthToSuperview()
+        bottomToolViewBottomConstraint =  bottomToolView.autoPinEdge(toSuperviewEdge: .bottom)
     }
 
     override public func viewWillAppear(_ animated: Bool) {
         Logger.debug("")
         super.viewWillAppear(animated)
 
+        UIViewController.attemptRotationToDeviceOrientation()
+
         guard let navigationBar = navigationController?.navigationBar as? OWSNavigationBar else {
             owsFailDebug("navigationBar was nil or unexpected class")
             return
         }
-        navigationBar.overrideTheme(type: .clear)
+        navigationBar.switchToStyle(.alwaysDarkAndClear)
 
         updateContents(isApproved: false)
     }
@@ -245,7 +263,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
 
     private func updateContents(isApproved: Bool) {
         updateNavigationBar()
-        updateInputAccessory(isApproved: isApproved)
+        updateBottomToolView(isApproved: isApproved)
 
         touchInterceptorView.isHidden = !isEditingCaptions
 
@@ -255,47 +273,48 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
 
     // MARK: - Input Accessory
 
-    override public var inputAccessoryView: UIView? {
-        bottomToolView.layoutIfNeeded()
-        return bottomToolView
+    public override var canBecomeFirstResponder: Bool {
+        return true
     }
 
-    override public var canBecomeFirstResponder: Bool {
-        return !shouldHideControls
+    public override var inputAccessoryView: UIView? {
+        return inputAccessoryPlaceholder
     }
 
-    public func updateInputAccessory(isApproved: Bool) {
+    public override var textInputContextIdentifier: String? {
+        return approvalDelegate?.attachmentApprovalTextInputContextIdentifier
+    }
+
+    public func updateBottomToolView(isApproved: Bool) {
         var currentPageViewController: AttachmentPrepViewController?
         if pageViewControllers.count == 1 {
             currentPageViewController = pageViewControllers.first
         }
         let currentAttachmentItem: AttachmentApprovalItem? = currentPageViewController?.attachmentApprovalItem
 
-        let hasPresentedView = self.presentedViewController != nil
-        let isToolbarFirstResponder = bottomToolView.hasFirstResponder
-        if !shouldHideControls, !isFirstResponder, !hasPresentedView, !isToolbarFirstResponder {
-            becomeFirstResponder()
-        }
+        bottomToolView.isHidden = shouldHideControls
+        bottomToolView.isUserInteractionEnabled = !shouldHideControls
 
         bottomToolView.update(isEditingCaptions: isEditingCaptions,
                               currentAttachmentItem: currentAttachmentItem,
                               shouldHideControls: shouldHideControls,
-                              isApproved: isApproved)
+                              isApproved: isApproved,
+                              recipientNames: approvalDelegate?.attachmentApprovalRecipientNames ?? [])
     }
 
-    public var messageText: String? {
+    public var messageBody: MessageBody? {
         get {
-            return attachmentTextToolbar.messageText
+            return attachmentTextToolbar.messageBody
         }
         set {
-            attachmentTextToolbar.messageText = newValue
+            attachmentTextToolbar.messageBody = newValue
         }
     }
 
     // MARK: - Navigation Bar
 
     lazy var saveButton: UIView = {
-        return OWSButton.navigationBarButton(imageName: "download-outline-28") { [weak self] in
+        return OWSButton.navigationBarButton(imageName: "save-24") { [weak self] in
             self?.didTapSave()
         }
     }()
@@ -324,7 +343,8 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
             viewControllers.count == 1,
             let firstViewController = viewControllers.first as? AttachmentPrepViewController {
             navigationBarItems.append(contentsOf: firstViewController.navigationBarItems())
-            if firstViewController.attachmentApprovalItem.canSave {
+            if firstViewController.attachmentApprovalItem.canSave &&
+                !firstViewController.hasCustomSaveButton {
                 navigationBarItems.append(saveButton)
             }
 
@@ -345,21 +365,9 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
         updateNavigationBar(navigationBarItems: navigationBarItems)
 
         if options.contains(.hasCancel) {
-            // Mimic a UIBarButtonItem of type .cancel, but with a shadow.
-            let cancelButton = OWSButton(title: CommonStrings.cancelButton) { [weak self] in
+            let cancelButton = OWSButton.shadowedCancelButton { [weak self] in
                 self?.cancelPressed()
             }
-            cancelButton.setTitleColor(.white, for: .normal)
-            if let titleLabel = cancelButton.titleLabel {
-                titleLabel.font = UIFont.systemFont(ofSize: 18.0)
-                titleLabel.layer.shadowColor = UIColor.black.cgColor
-                titleLabel.layer.shadowRadius = 2.0
-                titleLabel.layer.shadowOpacity = 0.66
-                titleLabel.layer.shadowOffset = .zero
-            } else {
-                owsFailDebug("Missing titleLabel.")
-            }
-            cancelButton.sizeToFit()
             navigationItem.leftBarButtonItem = UIBarButtonItem(customView: cancelButton)
         } else {
             // Mimic a conventional back button, but with a shadow.
@@ -478,7 +486,7 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
             }
 
             // use compact scale when keyboard is popped.
-            let scale: AttachmentPrepViewController.AttachmentViewScale = self.isFirstResponder ? .fullsize : .compact
+            let scale: AttachmentPrepViewController.AttachmentViewScale = self.bottomToolView.isEditing ? .compact : .fullsize
             pendingPage.setAttachmentViewScale(scale, animated: false)
         }
     }
@@ -593,11 +601,12 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
 
         page.loadViewIfNeeded()
 
+        Logger.debug("currentItem for attachment: \(item.attachment.debugDescription)")
         self.setViewControllers([page], direction: direction, animated: isAnimated, completion: nil)
         updateMediaRail()
     }
 
-    func updateMediaRail() {
+    func updateMediaRail(animated: Bool = false, isTypingMention: Bool = false) {
         guard let currentItem = self.currentItem else {
             owsFailDebug("currentItem was unexpectedly nil")
             return
@@ -617,10 +626,10 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
             }
         }
 
-        galleryRailView.configureCellViews(itemProvider: attachmentApprovalItemCollection,
+        galleryRailView.configureCellViews(itemProvider: isTypingMention ? nil : attachmentApprovalItemCollection,
                                            focusedItem: currentItem,
                                            cellViewBuilder: cellViewBuilder,
-                                           animated: false)
+                                           animated: animated)
     }
 
     var attachmentApprovalItemCollection: AttachmentApprovalItemCollection!
@@ -629,70 +638,122 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
         return attachmentApprovalItemCollection.attachmentApprovalItems
     }
 
-    var attachments: [SignalAttachment] {
-        return attachmentApprovalItems.map { (attachmentApprovalItem) in
-            autoreleasepool {
-                return self.processedAttachment(forAttachmentItem: attachmentApprovalItem)
-            }
+    func outputAttachmentsPromise() -> Promise<[SignalAttachment]> {
+        var promises = [Promise<SignalAttachment>]()
+        for attachmentApprovalItem in attachmentApprovalItems {
+            promises.append(outputAttachmentPromise(for: attachmentApprovalItem))
         }
+        return when(fulfilled: promises)
     }
 
-    // For any attachments edited with the image editor, returns a
+    // For any attachments edited with an editor, returns a
     // new SignalAttachment that reflects those changes.  Otherwise,
     // returns the original attachment.
     //
     // If any errors occurs in the export process, we fail over to
     // sending the original attachment.  This seems better than trying
     // to involve the user in resolving the issue.
-    func processedAttachment(forAttachmentItem attachmentApprovalItem: AttachmentApprovalItem) -> SignalAttachment {
-        guard let imageEditorModel = attachmentApprovalItem.imageEditorModel else {
-            // Image was not edited.
-            return attachmentApprovalItem.attachment
+    func outputAttachmentPromise(for attachmentApprovalItem: AttachmentApprovalItem) -> Promise<SignalAttachment> {
+        if let imageEditorModel = attachmentApprovalItem.imageEditorModel, imageEditorModel.isDirty() {
+            return editedAttachmentPromise(imageEditorModel: imageEditorModel,
+                                           attachmentApprovalItem: attachmentApprovalItem)
         }
-        guard imageEditorModel.isDirty() else {
-            // Image editor has no changes.
-            return attachmentApprovalItem.attachment
+        if let videoEditorModel = attachmentApprovalItem.videoEditorModel, videoEditorModel.needsRender {
+            return renderedAttachmentPromise(videoEditorModel: videoEditorModel,
+                                             attachmentApprovalItem: attachmentApprovalItem)
         }
-        guard let dstImage = imageEditorModel.renderOutput() else {
-            owsFailDebug("Could not render for output.")
-            return attachmentApprovalItem.attachment
-        }
-        var dataUTI = kUTTypeImage as String
-        guard let dstData: Data = {
-            let isLossy: Bool = attachmentApprovalItem.attachment.mimeType.caseInsensitiveCompare(OWSMimeTypeImageJpeg) == .orderedSame
-            if isLossy {
-                dataUTI = kUTTypeJPEG as String
-                return dstImage.jpegData(compressionQuality: 0.9)
-            } else {
-                dataUTI = kUTTypePNG as String
-                return dstImage.pngData()
-            }
-            }() else {
-                owsFailDebug("Could not export for output.")
-                return attachmentApprovalItem.attachment
-        }
-        guard let dataSource = DataSourceValue.dataSource(with: dstData, utiType: dataUTI) else {
-            owsFailDebug("Could not prepare data source for output.")
-            return attachmentApprovalItem.attachment
-        }
+        // No editor applies. Use original, un-edited attachment.
+        return Promise.value(attachmentApprovalItem.attachment)
+    }
 
-        // Rewrite the filename's extension to reflect the output file format.
-        var filename: String? = attachmentApprovalItem.attachment.sourceFilename
-        if let sourceFilename = attachmentApprovalItem.attachment.sourceFilename {
-            if let fileExtension: String = MIMETypeUtil.fileExtension(forUTIType: dataUTI) {
+    // For any attachments edited with the image editor, returns a
+    // new SignalAttachment that reflects those changes.
+    //
+    // If any errors occurs in the export process, we fail over to
+    // sending the original attachment.  This seems better than trying
+    // to involve the user in resolving the issue.
+    func editedAttachmentPromise(imageEditorModel: ImageEditorModel,
+                                 attachmentApprovalItem: AttachmentApprovalItem) -> Promise<SignalAttachment> {
+        assert(imageEditorModel.isDirty())
+        return DispatchQueue.main.async(.promise) { () -> UIImage in
+            guard let dstImage = imageEditorModel.renderOutput() else {
+                throw OWSAssertionError("Could not render for output.")
+            }
+            return dstImage
+        }.map(on: .global()) { (dstImage: UIImage) -> SignalAttachment in
+            var dataUTI = kUTTypeImage as String
+            guard let dstData: Data = {
+                let isLossy: Bool = attachmentApprovalItem.attachment.mimeType.caseInsensitiveCompare(OWSMimeTypeImageJpeg) == .orderedSame
+                if isLossy {
+                    dataUTI = kUTTypeJPEG as String
+                    return dstImage.jpegData(compressionQuality: 0.9)
+                } else {
+                    dataUTI = kUTTypePNG as String
+                    return dstImage.pngData()
+                }
+                }() else {
+                    owsFailDebug("Could not export for output.")
+                    return attachmentApprovalItem.attachment
+            }
+            guard let dataSource = DataSourceValue.dataSource(with: dstData, utiType: dataUTI) else {
+                owsFailDebug("Could not prepare data source for output.")
+                return attachmentApprovalItem.attachment
+            }
+
+            // Rewrite the filename's extension to reflect the output file format.
+            var filename: String? = attachmentApprovalItem.attachment.sourceFilename
+            if let sourceFilename = attachmentApprovalItem.attachment.sourceFilename {
+                if let fileExtension: String = MIMETypeUtil.fileExtension(forUTIType: dataUTI) {
+                    filename = (sourceFilename as NSString).deletingPathExtension.appendingFileExtension(fileExtension)
+                }
+            }
+            dataSource.sourceFilename = filename
+
+            let dstAttachment = SignalAttachment.attachment(dataSource: dataSource, dataUTI: dataUTI, imageQuality: .original)
+            if let attachmentError = dstAttachment.error {
+                owsFailDebug("Could not prepare attachment for output: \(attachmentError).")
+                return attachmentApprovalItem.attachment
+            }
+            // Preserve caption text.
+            dstAttachment.captionText = attachmentApprovalItem.captionText
+            return dstAttachment
+        }
+    }
+
+    // For any attachments edited with the video editor, returns a
+    // new SignalAttachment that reflects those changes.
+    //
+    // If any errors occurs in the export process, we fail over to
+    // sending the original attachment.  This seems better than trying
+    // to involve the user in resolving the issue.
+    func renderedAttachmentPromise(videoEditorModel: VideoEditorModel,
+                                  attachmentApprovalItem: AttachmentApprovalItem) -> Promise<SignalAttachment> {
+        assert(videoEditorModel.needsRender)
+        return videoEditorModel.ensureCurrentRender().result.map(on: .sharedUserInitiated) { result in
+            let filePath = try result.consumeResultPath()
+            guard let fileExtension = filePath.fileExtension else {
+                throw OWSAssertionError("Missing fileExtension.")
+            }
+            guard let dataUTI = MIMETypeUtil.utiType(forFileExtension: fileExtension) else {
+                throw OWSAssertionError("Missing dataUTI.")
+            }
+            let dataSource = try DataSourcePath.dataSource(withFilePath: filePath, shouldDeleteOnDeallocation: true)
+            // Rewrite the filename's extension to reflect the output file format.
+            var filename: String? = attachmentApprovalItem.attachment.sourceFilename
+            if let sourceFilename = attachmentApprovalItem.attachment.sourceFilename {
                 filename = (sourceFilename as NSString).deletingPathExtension.appendingFileExtension(fileExtension)
             }
-        }
-        dataSource.sourceFilename = filename
+            dataSource.sourceFilename = filename
 
-        let dstAttachment = SignalAttachment.attachment(dataSource: dataSource, dataUTI: dataUTI, imageQuality: .original)
-        if let attachmentError = dstAttachment.error {
-            owsFailDebug("Could not prepare attachment for output: \(attachmentError).")
-            return attachmentApprovalItem.attachment
+            let dstAttachment = SignalAttachment.attachment(dataSource: dataSource, dataUTI: dataUTI, imageQuality: .original)
+            if let attachmentError = dstAttachment.error {
+                throw OWSAssertionError("Could not prepare attachment for output: \(attachmentError).")
+            }
+            // Preserve caption text.
+            dstAttachment.captionText = attachmentApprovalItem.captionText
+            dstAttachment.isViewOnceAttachment = attachmentApprovalItem.attachment.isViewOnceAttachment
+            return dstAttachment
         }
-        // Preserve caption text.
-        dstAttachment.captionText = attachmentApprovalItem.captionText
-        return dstAttachment
     }
 
     func attachmentApprovalItem(before currentItem: AttachmentApprovalItem) -> AttachmentApprovalItem? {
@@ -775,18 +836,18 @@ public class AttachmentApprovalViewController: UIPageViewController, UIPageViewC
                             if didSucceed {
                                 let toastController = ToastController(text: NSLocalizedString("ATTACHMENT_APPROVAL_MEDIA_DID_SAVE",
                                                                                               comment: "toast alert shown after user taps the 'save' button"))
-                                let inset = self.bottomToolView.height() + 16
+                                let inset = self.bottomToolView.height + 16
                                 toastController.presentToastView(fromBottomOfView: self.view, inset: inset)
                             } else {
                                 owsFailDebug("error: \(String(describing: error))")
-                                OWSAlerts.showErrorAlert(message: errorText)
+                                OWSActionSheets.showErrorAlert(message: errorText)
                             }
                         }
                     }
                 }
             } catch {
                 owsFailDebug("error: \(error)")
-                OWSAlerts.showErrorAlert(message: errorText)
+                OWSActionSheets.showErrorAlert(message: errorText)
             }
     }
 }
@@ -811,25 +872,88 @@ extension AttachmentApprovalViewController: AttachmentTextToolbarDelegate {
 
         // Generate the attachments once, so that any changes we
         // make below are reflected afterwards.
-        let attachments = self.attachments
+        ModalActivityIndicatorViewController.present(fromViewController: self, canCancel: false) { modalVC in
+            self.outputAttachmentsPromise()
+                .done { attachments in
+                    AssertIsOnMainThread()
+                    modalVC.dismiss {
+                        AssertIsOnMainThread()
 
-        if options.contains(.canToggleViewOnce),
-            preferences.isViewOnceMessagesEnabled() {
-            for attachment in attachments {
-                attachment.isViewOnceAttachment = true
-            }
-            assert(attachments.count <= 1)
+                        if self.options.contains(.canToggleViewOnce), self.isViewOnceEnabled {
+                            for attachment in attachments {
+                                attachment.isViewOnceAttachment = true
+                            }
+                            assert(attachments.count <= 1)
+                        }
+
+                        self.approvalDelegate?.attachmentApproval(self, didApproveAttachments: attachments, messageBody: attachmentTextToolbar.messageBody)
+                    }
+                }.catch { error in
+                    AssertIsOnMainThread()
+                    owsFailDebug("Error: \(error)")
+
+                    modalVC.dismiss {
+                        let actionSheet = ActionSheetController(
+                            title: CommonStrings.errorAlertTitle,
+                            message: NSLocalizedString(
+                                "ATTACHMENT_APPROVAL_FAILED_TO_EXPORT",
+                                comment: "Error that outgoing attachments could not be exported."))
+                        actionSheet.addAction(ActionSheetAction(title: CommonStrings.okButton, style: .default))
+
+                        self.present(actionSheet, animated: true) {
+                            // We optimistically hide the toolbar at the beginning of the function
+                            // Since we failed, show it again.
+                            self.updateContents(isApproved: false)
+                        }
+                    }
+                }
         }
-
-        approvalDelegate?.attachmentApproval(self, didApproveAttachments: attachments, messageText: attachmentTextToolbar.messageText)
     }
 
     func attachmentTextToolbarDidChange(_ attachmentTextToolbar: AttachmentTextToolbar) {
-        approvalDelegate?.attachmentApproval(self, didChangeMessageText: attachmentTextToolbar.messageText)
+        approvalDelegate?.attachmentApproval(self, didChangeMessageBody: attachmentTextToolbar.messageBody)
     }
 
     func attachmentTextToolbarDidViewOnce(_ attachmentTextToolbar: AttachmentTextToolbar) {
         updateContents(isApproved: false)
+
+        if isViewOnceEnabled {
+            attachmentTextToolbar.textView.stopTypingMention()
+        }
+    }
+
+    public func textViewDidBeginTypingMention(_ textView: MentionTextView) {
+        guard !textViewMentionPickerPossibleAddresses(textView).isEmpty else { return }
+
+        updateMediaRail(animated: true, isTypingMention: true)
+    }
+
+    public func textViewDidEndTypingMention(_ textView: MentionTextView) {
+        guard !textViewMentionPickerPossibleAddresses(textView).isEmpty else { return }
+
+        updateMediaRail(animated: true, isTypingMention: false)
+    }
+
+    public func textViewMentionPickerParentView(_ textView: MentionTextView) -> UIView? {
+        return view
+    }
+
+    public func textViewMentionPickerReferenceView(_ textView: MentionTextView) -> UIView? {
+        return bottomToolView
+    }
+
+    public func textViewMentionPickerPossibleAddresses(_ textView: MentionTextView) -> [SignalServiceAddress] {
+        return approvalDelegate?.attachmentApprovalMentionableAddresses ?? []
+    }
+
+    public func textView(_ textView: MentionTextView, didDeleteMention mention: Mention) {}
+
+    public func textView(_ textView: MentionTextView, shouldResolveMentionForAddress address: SignalServiceAddress) -> Bool {
+        return approvalDelegate?.attachmentApprovalMentionableAddresses.contains(address) ?? false
+    }
+
+    public func textViewMentionStyle(_ textView: MentionTextView) -> Mention.Style {
+        return .composingAttachment
     }
 }
 
@@ -841,7 +965,13 @@ extension AttachmentApprovalViewController: AttachmentPrepViewControllerDelegate
     }
 
     func prepViewControllerUpdateControls() {
-        updateInputAccessory(isApproved: false)
+        updateBottomToolView(isApproved: false)
+    }
+
+    var prepViewControllerShouldIgnoreTapGesture: Bool {
+        guard bottomToolView.isEditing else { return false }
+        _ = bottomToolView.resignFirstResponder()
+        return true
     }
 }
 
@@ -900,12 +1030,6 @@ extension AttachmentApprovalViewController: GalleryRailViewDelegate {
 
 // MARK: -
 
-enum KeyboardScenario {
-    case hidden, editingMessage, editingCaption
-}
-
-// MARK: -
-
 extension AttachmentApprovalViewController: ApprovalRailCellViewDelegate {
     func approvalRailCellView(_ approvalRailCellView: ApprovalRailCellView, didRemoveItem attachmentApprovalItem: AttachmentApprovalItem) {
         remove(attachmentApprovalItem: attachmentApprovalItem)
@@ -916,18 +1040,59 @@ extension AttachmentApprovalViewController: ApprovalRailCellViewDelegate {
     }
 }
 
+extension AttachmentApprovalViewController: InputAccessoryViewPlaceholderDelegate {
+    func inputAccessoryPlaceholderKeyboardIsPresenting(animationDuration: TimeInterval, animationCurve: UIView.AnimationCurve) {
+        handleKeyboardStateChange(animationDuration: animationDuration, animationCurve: animationCurve)
+    }
+
+    func inputAccessoryPlaceholderKeyboardDidPresent() {
+        updateBottomToolViewPosition()
+    }
+
+    func inputAccessoryPlaceholderKeyboardIsDismissing(animationDuration: TimeInterval, animationCurve: UIView.AnimationCurve) {
+        handleKeyboardStateChange(animationDuration: animationDuration, animationCurve: animationCurve)
+    }
+
+    func inputAccessoryPlaceholderKeyboardDidDismiss() {
+        updateBottomToolViewPosition()
+    }
+
+    func inputAccessoryPlaceholderKeyboardIsDismissingInteractively() {
+        updateBottomToolViewPosition()
+    }
+
+    func handleKeyboardStateChange(animationDuration: TimeInterval, animationCurve: UIView.AnimationCurve) {
+        guard animationDuration > 0 else { return updateBottomToolViewPosition() }
+
+        UIView.beginAnimations("keyboardStateChange", context: nil)
+        UIView.setAnimationBeginsFromCurrentState(true)
+        UIView.setAnimationCurve(animationCurve)
+        UIView.setAnimationDuration(animationDuration)
+        updateBottomToolViewPosition()
+        UIView.commitAnimations()
+    }
+
+    func updateBottomToolViewPosition() {
+        bottomToolViewBottomConstraint?.constant = -inputAccessoryPlaceholder.keyboardOverlap
+
+        // We always want to apply the new bottom bar position immediately,
+        // as this only happens during animations (interactive or otherwise)
+        bottomToolView.superview?.layoutIfNeeded()
+    }
+}
+
 // MARK: -
 
-extension AttachmentApprovalViewController: AttachmentApprovalInputAccessoryViewDelegate {
-    public func attachmentApprovalInputUpdateMediaRail() {
+extension AttachmentApprovalViewController: AttachmentApprovalToolbarDelegate {
+    public func attachmentApprovalToolbarUpdateMediaRail() {
         updateMediaRail()
     }
 
-    public func attachmentApprovalInputStartEditingCaptions() {
+    public func attachmentApprovalToolbarStartEditingCaptions() {
         isEditingCaptions = true
     }
 
-    public func attachmentApprovalInputStopEditingCaptions() {
+    public func attachmentApprovalToolbarStopEditingCaptions() {
         isEditingCaptions = false
     }
 }

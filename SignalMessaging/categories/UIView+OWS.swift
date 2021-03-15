@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,6 +10,28 @@ public extension UIEdgeInsets {
                   left: CurrentAppContext().isRTL ? trailing : leading,
                   bottom: bottom,
                   right: CurrentAppContext().isRTL ? leading : trailing)
+    }
+
+    init(hMargin: CGFloat, vMargin: CGFloat) {
+        self.init(top: vMargin, left: hMargin, bottom: vMargin, right: hMargin)
+    }
+
+    func plus(_ inset: CGFloat) -> UIEdgeInsets {
+        var newInsets = self
+        newInsets.top += inset
+        newInsets.bottom += inset
+        newInsets.left += inset
+        newInsets.right += inset
+        return newInsets
+    }
+
+    func minus(_ inset: CGFloat) -> UIEdgeInsets {
+        return plus(-inset)
+    }
+
+    var asSize: CGSize {
+        CGSize(width: left + right,
+               height: top + bottom)
     }
 }
 
@@ -44,6 +66,30 @@ public extension UINavigationController {
     }
 }
 
+// MARK: - SpacerView
+
+public class SpacerView: UIView {
+    private var preferredSize: CGSize
+
+    convenience public init(preferredWidth: CGFloat = UIView.noIntrinsicMetric, preferredHeight: CGFloat = UIView.noIntrinsicMetric) {
+        self.init(preferredSize: CGSize(width: preferredWidth, height: preferredHeight))
+    }
+
+    public init(preferredSize: CGSize = CGSize(square: UIView.noIntrinsicMetric)) {
+        self.preferredSize = preferredSize
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override public var intrinsicContentSize: CGSize {
+        get { preferredSize }
+        set { preferredSize = newValue }
+    }
+}
+
 // MARK: -
 
 @objc
@@ -53,25 +99,13 @@ public extension UIView {
     }
 
     func renderAsImage(opaque: Bool, scale: CGFloat) -> UIImage? {
-        if #available(iOS 10, *) {
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = scale
-            format.opaque = opaque
-            let renderer = UIGraphicsImageRenderer(bounds: self.bounds,
-                                                   format: format)
-            return renderer.image { (context) in
-                self.layer.render(in: context.cgContext)
-            }
-        } else {
-            UIGraphicsBeginImageContextWithOptions(bounds.size, opaque, scale)
-            if let _ = UIGraphicsGetCurrentContext() {
-                drawHierarchy(in: bounds, afterScreenUpdates: true)
-                let image = UIGraphicsGetImageFromCurrentImageContext()
-                UIGraphicsEndImageContext()
-                return image
-            }
-            owsFailDebug("Could not create graphics context.")
-            return nil
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = opaque
+        let renderer = UIGraphicsImageRenderer(bounds: self.bounds,
+                                               format: format)
+        return renderer.image { (context) in
+            self.layer.render(in: context.cgContext)
         }
     }
 
@@ -87,6 +121,12 @@ public extension UIView {
         return view
     }
 
+    class func spacer(matchingHeightOf matchView: UIView, withMultiplier multiplier: CGFloat) -> UIView {
+        let spacer = UIView()
+        spacer.autoMatch(.height, to: .height, of: matchView, withMultiplier: multiplier)
+        return spacer
+    }
+
     class func hStretchingSpacer() -> UIView {
         let view = UIView()
         view.setContentHuggingHorizontalLow()
@@ -94,10 +134,21 @@ public extension UIView {
         return view
     }
 
-    class func vStretchingSpacer() -> UIView {
+    @nonobjc
+    class func vStretchingSpacer(minHeight: CGFloat? = nil, maxHeight: CGFloat? = nil) -> UIView {
         let view = UIView()
         view.setContentHuggingVerticalLow()
         view.setCompressionResistanceVerticalLow()
+
+        if let minHeight = minHeight {
+            view.autoSetDimension(.height, toSize: minHeight, relation: .greaterThanOrEqual)
+        }
+        if let maxHeight = maxHeight {
+            NSLayoutConstraint.autoSetPriority(.defaultLow) {
+                view.autoSetDimension(.height, toSize: maxHeight)
+            }
+        }
+
         return view
     }
 
@@ -117,6 +168,11 @@ public extension UIView {
         constraints.append(subview.autoPin(toAspectRatio: aspectRatio))
         constraints.append(subview.autoMatch(.width, to: .width, of: self, withMultiplier: 1.0, relation: .lessThanOrEqual))
         constraints.append(subview.autoMatch(.height, to: .height, of: self, withMultiplier: 1.0, relation: .lessThanOrEqual))
+        NSLayoutConstraint.autoSetPriority(UILayoutPriority.defaultHigh) {
+            constraints.append(subview.autoMatch(.width, to: .width, of: self, withMultiplier: 1.0, relation: .equal))
+            constraints.append(subview.autoMatch(.height, to: .height, of: self, withMultiplier: 1.0, relation: .equal))
+        }
+
         return constraints
     }
 
@@ -138,32 +194,117 @@ public extension UIView {
     func setAccessibilityIdentifier(in container: NSObject, name: String) {
         self.accessibilityIdentifier = UIView.accessibilityIdentifier(in: container, name: name)
     }
+
+    func animateDecelerationToVerticalEdge(
+        withDuration duration: TimeInterval,
+        velocity: CGPoint,
+        velocityThreshold: CGFloat = 500,
+        boundingRect: CGRect,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        var velocity = velocity
+        if abs(velocity.x) < velocityThreshold { velocity.x = 0 }
+        if abs(velocity.y) < velocityThreshold { velocity.y = 0 }
+
+        let currentPosition = frame.origin
+
+        let referencePoint: CGPoint
+        if velocity != .zero {
+            // Calculate the time until we intersect with each edge with
+            // a constant velocity.
+
+            // time = (end position - start positon) / velocity
+
+            let timeUntilVerticalEdge: CGFloat
+            if velocity.x > 0 {
+                timeUntilVerticalEdge = ((boundingRect.maxX - width) - currentPosition.x) / velocity.x
+            } else if velocity.x < 0 {
+                timeUntilVerticalEdge = (boundingRect.minX - currentPosition.x) / velocity.x
+            } else {
+                timeUntilVerticalEdge = .greatestFiniteMagnitude
+            }
+
+            let timeUntilHorizontalEdge: CGFloat
+            if velocity.y > 0 {
+                timeUntilHorizontalEdge = ((boundingRect.maxY - height) - currentPosition.y) / velocity.y
+            } else if velocity.y < 0 {
+                timeUntilHorizontalEdge = (boundingRect.minY - currentPosition.y) / velocity.y
+            } else {
+                timeUntilHorizontalEdge = .greatestFiniteMagnitude
+            }
+
+            // See which edge we intersect with first and calculate the position
+            // on the other axis when we reach that intersection point.
+
+            // end position = (time * velocity) + start position
+
+            let intersectPoint: CGPoint
+            if timeUntilHorizontalEdge > timeUntilVerticalEdge {
+                intersectPoint = CGPoint(
+                    x: velocity.x > 0 ? (boundingRect.maxX - width) : boundingRect.minX,
+                    y: (timeUntilVerticalEdge * velocity.y) + currentPosition.y
+                )
+            } else {
+                intersectPoint = CGPoint(
+                    x: (timeUntilHorizontalEdge * velocity.x) + currentPosition.x,
+                    y: velocity.y > 0 ? (boundingRect.maxY - height) : boundingRect.minY
+                )
+            }
+
+            referencePoint = intersectPoint
+        } else {
+            referencePoint = currentPosition
+        }
+
+        let destinationFrame = CGRect(origin: referencePoint, size: frame.size).pinnedToVerticalEdge(of: boundingRect)
+        let distance = destinationFrame.origin.distance(currentPosition)
+
+        UIView.animate(
+            withDuration: duration,
+            delay: 0,
+            usingSpringWithDamping: 1,
+            initialSpringVelocity: abs(velocity.length / distance),
+            options: .curveEaseOut,
+            animations: { self.frame = destinationFrame },
+            completion: completion
+        )
+    }
+
+    func autoPinHeight(toHeightOf otherView: UIView) {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint(item: self, attribute: .height, relatedBy: .equal, toItem: otherView, attribute: .height, multiplier: 1, constant: 0).autoInstall()
+    }
+
+    func autoPinWidth(toWidthOf otherView: UIView) {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint(item: self, attribute: .width, relatedBy: .equal, toItem: otherView, attribute: .width, multiplier: 1, constant: 0).autoInstall()
+    }
+
+    func removeAllSubviews() {
+        for subview in subviews {
+            subview.removeFromSuperview()
+        }
+    }
 }
 
 // MARK: -
 
 @objc
 public extension UIViewController {
-    func presentAlert(_ alert: UIAlertController) {
-        self.presentAlert(alert, animated: true)
+    func presentActionSheet(_ alert: ActionSheetController) {
+        self.presentActionSheet(alert, animated: true)
     }
 
-    func presentAlert(_ alert: UIAlertController, animated: Bool) {
-        self.present(alert,
-                     animated: animated,
-                     completion: {
-                        alert.applyAccessibilityIdentifiers()
-        })
+    func presentActionSheet(_ alert: ActionSheetController, animated: Bool) {
+        self.present(alert, animated: animated)
     }
 
-    func presentAlert(_ alert: UIAlertController, completion: @escaping (() -> Void)) {
+    func presentActionSheet(_ alert: ActionSheetController, completion: @escaping (() -> Void)) {
         self.present(alert,
                      animated: true,
-                     completion: {
-                        alert.applyAccessibilityIdentifiers()
-
-                        completion()
-        })
+                     completion: completion)
     }
 
     /// A convenience function to present a modal view full screen, not using
@@ -173,48 +314,16 @@ public extension UIViewController {
         viewControllerToPresent.modalPresentationStyle = .fullScreen
         present(viewControllerToPresent, animated: animated, completion: completion)
     }
-}
 
-// MARK: -
-
-public extension CGFloat {
-    func clamp(_ minValue: CGFloat, _ maxValue: CGFloat) -> CGFloat {
-        return CGFloatClamp(self, minValue, maxValue)
-    }
-
-    func clamp01() -> CGFloat {
-        return CGFloatClamp01(self)
-    }
-
-    // Linear interpolation
-    func lerp(_ minValue: CGFloat, _ maxValue: CGFloat) -> CGFloat {
-        return CGFloatLerp(minValue, maxValue, self)
-    }
-
-    // Inverse linear interpolation
-    func inverseLerp(_ minValue: CGFloat, _ maxValue: CGFloat, shouldClamp: Bool = false) -> CGFloat {
-        let value = CGFloatInverseLerp(self, minValue, maxValue)
-        return (shouldClamp ? CGFloatClamp01(value) : value)
-    }
-
-    static let halfPi: CGFloat = CGFloat.pi * 0.5
-
-    func fuzzyEquals(_ other: CGFloat, tolerance: CGFloat = 0.001) -> Bool {
-        return abs(self - other) < tolerance
-    }
-
-    var square: CGFloat {
-        return self * self
-    }
-}
-
-// MARK: -
-
-public extension Int {
-    func clamp(_ minValue: Int, _ maxValue: Int) -> Int {
-        assert(minValue <= maxValue)
-
-        return Swift.max(minValue, Swift.min(maxValue, self))
+    @objc(presentFormSheetViewController:animated:completion:)
+    func presentFormSheet(_ viewControllerToPresent: UIViewController, animated: Bool, completion: (() -> Void)? = nil) {
+        // Presenting form sheet on iPhone should always use the default presentation style.
+        // We get this for free, except on phones with the regular width size class (big phones
+        // in landscape, XR, XS Max, 8+, etc.)
+        if UIDevice.current.isIPad {
+            viewControllerToPresent.modalPresentationStyle = .formSheet
+        }
+        present(viewControllerToPresent, animated: animated, completion: completion)
     }
 }
 
@@ -247,6 +356,14 @@ public extension CGPoint {
         return CGPointAdd(self, value)
     }
 
+    func plusX(_ value: CGFloat) -> CGPoint {
+        CGPointAdd(self, CGPoint(x: value, y: 0))
+    }
+
+    func plusY(_ value: CGFloat) -> CGPoint {
+        CGPointAdd(self, CGPoint(x: 0, y: value))
+    }
+
     func minus(_ value: CGPoint) -> CGPoint {
         return CGPointSubtract(self, value)
     }
@@ -269,6 +386,16 @@ public extension CGPoint {
 
     var length: CGFloat {
         return sqrt(x * x + y * y)
+    }
+
+    @inlinable
+    func distance(_ other: CGPoint) -> CGFloat {
+        return sqrt(pow(x - other.x, 2) + pow(y - other.y, 2))
+    }
+
+    @inlinable
+    func within(_ delta: CGFloat, of other: CGPoint) -> Bool {
+        return distance(other) <= delta
     }
 
     static let unit: CGPoint = CGPoint(x: 1.0, y: 1.0)
@@ -314,14 +441,66 @@ public extension CGSize {
         return CGSizeCeil(self)
     }
 
+    var floor: CGSize {
+        return CGSizeFloor(self)
+    }
+
+    var round: CGSize {
+        return CGSizeRound(self)
+    }
+
+    var abs: CGSize {
+        return CGSize(width: Swift.abs(width), height: Swift.abs(height))
+    }
+
+    var largerAxis: CGFloat {
+        return Swift.max(width, height)
+    }
+
+    var smallerAxis: CGFloat {
+        return min(width, height)
+    }
+
     init(square: CGFloat) {
         self.init(width: square, height: square)
+    }
+
+    func plus(_ value: CGSize) -> CGSize {
+        return CGSizeAdd(self, value)
+    }
+
+    func max(_ other: CGSize) -> CGSize {
+        return CGSize(width: Swift.max(self.width, other.width),
+                      height: Swift.max(self.height, other.height))
+    }
+
+    static func square(_ size: CGFloat) -> CGSize {
+        return CGSize(width: size, height: size)
     }
 }
 
 // MARK: -
 
 public extension CGRect {
+
+    var x: CGFloat {
+        get {
+            origin.x
+        }
+        set {
+            origin.x = newValue
+        }
+    }
+
+    var y: CGFloat {
+        get {
+            origin.y
+        }
+        set {
+            origin.y = newValue
+        }
+    }
+
     var center: CGPoint {
         return CGPoint(x: midX, y: midY)
     }
@@ -340,6 +519,43 @@ public extension CGRect {
 
     var bottomRight: CGPoint {
         return CGPoint(x: maxX, y: maxY)
+    }
+
+    func pinnedToVerticalEdge(of boundingRect: CGRect) -> CGRect {
+        var newRect = self
+
+        // If we're positioned outside of the vertical bounds,
+        // we need to move to the nearest bound
+        let positionedOutOfVerticalBounds = newRect.minY < boundingRect.minY || newRect.maxY > boundingRect.maxY
+
+        // If we're position anywhere but exactly at the vertical
+        // edges (left and right of bounding rect), we need to
+        // move to the nearest edge
+        let positionedAwayFromVerticalEdges = boundingRect.minX != newRect.minX && boundingRect.maxX != newRect.maxX
+
+        if positionedOutOfVerticalBounds {
+            let distanceFromTop = newRect.minY - boundingRect.minY
+            let distanceFromBottom = boundingRect.maxY - newRect.maxY
+
+            if distanceFromTop > distanceFromBottom {
+                newRect.origin.y = boundingRect.maxY - newRect.height
+            } else {
+                newRect.origin.y = boundingRect.minY
+            }
+        }
+
+        if positionedAwayFromVerticalEdges {
+            let distanceFromLeading = newRect.minX - boundingRect.minX
+            let distanceFromTrailing = boundingRect.maxX - newRect.maxX
+
+            if distanceFromLeading > distanceFromTrailing {
+                newRect.origin.x = boundingRect.maxX - newRect.width
+            } else {
+                newRect.origin.x = boundingRect.minX
+            }
+        }
+
+        return newRect
     }
 }
 
@@ -499,10 +715,7 @@ public extension UIImageView {
 @objc
 public extension UISearchBar {
     var textField: UITextField? {
-        // TODO Xcode 11: Delete this once we're compiling only in Xcode 11
-        #if swift(>=5.1)
         if #available(iOS 13, *) { return searchTextField }
-        #endif
 
         guard let textField = self.value(forKey: "_searchField") as? UITextField else {
             owsFailDebug("Couldn't find UITextField.")
@@ -521,6 +734,16 @@ public extension UITextView {
         inputDelegate?.selectionWillChange(self)
         inputDelegate?.selectionDidChange(self)
     }
+
+    func updateVerticalInsetsForDynamicBodyType(defaultInsets: CGFloat) {
+        let currentFontSize = UIFont.ows_dynamicTypeBody.pointSize
+        let systemDefaultFontSize: CGFloat = 17
+        let insetFontAdjustment = systemDefaultFontSize > currentFontSize ? systemDefaultFontSize - currentFontSize : 0
+        let topInset = defaultInsets + insetFontAdjustment
+        let bottomInset = systemDefaultFontSize > currentFontSize ? topInset - 1 : topInset
+        textContainerInset.top = topInset
+        textContainerInset.bottom = bottomInset
+    }
 }
 
 // MARK: -
@@ -533,21 +756,6 @@ public extension UITextField {
     }
 }
 
-@objc
-public extension UIView {
-    var findFirstResponder: UIView? {
-        guard !isFirstResponder else { return self }
-
-        for subview in subviews {
-            if let firstResponder = subview.findFirstResponder {
-                return firstResponder
-            }
-        }
-
-        return nil
-    }
-}
-
 public extension UIView {
     func firstAncestor<T>(ofType type: T.Type) -> T? {
         guard let superview = superview else {
@@ -555,5 +763,77 @@ public extension UIView {
         }
 
         return superview as? T ?? superview.firstAncestor(ofType: type)
+    }
+}
+
+public extension UIToolbar {
+    static func clear() -> UIToolbar {
+        let toolbar = UIToolbar()
+        toolbar.backgroundColor = .clear
+
+        // Making a toolbar transparent requires setting an empty uiimage
+        toolbar.setBackgroundImage(UIImage(), forToolbarPosition: .any, barMetrics: .default)
+
+        // hide 1px top-border
+        toolbar.clipsToBounds = true
+
+        return toolbar
+    }
+ }
+
+// MARK: -
+
+public extension UIEdgeInsets {
+    var totalWidth: CGFloat {
+        left + right
+    }
+
+    var totalHeight: CGFloat {
+        top + bottom
+    }
+}
+
+// MARK: - Gestures
+
+public extension UIView {
+    func containsGestureLocation(_ gestureRecognizer: UIGestureRecognizer,
+                                 hotAreaAdjustment: CGFloat? = nil) -> Bool {
+        let location = gestureRecognizer.location(in: self)
+        var hotArea = bounds
+        if let hotAreaAdjustment = hotAreaAdjustment {
+            owsAssertDebug(hotAreaAdjustment > 0)
+            // Permissive hot area to make it easier to perform gesture.
+            hotArea = hotArea.insetBy(dx: -hotAreaAdjustment, dy: -hotAreaAdjustment)
+        }
+        return hotArea.contains(location)
+    }
+}
+
+// MARK: -
+
+public extension UIStackView {
+    func addArrangedSubviews(_ subviews: [UIView], reverseOrder: Bool = false) {
+        var subviews = subviews
+        if reverseOrder {
+            subviews.reverse()
+        }
+        for subview in subviews {
+            addArrangedSubview(subview)
+        }
+    }
+}
+
+// MARK: -
+
+// This works around a UIStackView bug where hidden subviews
+// sometimes re-appear.
+@objc
+public extension UIView {
+    var isHiddenInStackView: Bool {
+        get { isHidden }
+        set {
+            isHidden = newValue
+            alpha = newValue ? 0 : 1
+        }
     }
 }

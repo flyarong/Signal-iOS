@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -12,6 +12,8 @@ import SignalCoreKit
 // MARK: - Record
 
 public struct KnownStickerPackRecord: SDSRecord {
+    public weak var delegate: SDSRecordDelegate?
+
     public var tableMetadata: SDSTableMetadata {
         return KnownStickerPackSerializer.table
     }
@@ -25,7 +27,7 @@ public struct KnownStickerPackRecord: SDSRecord {
     public let recordType: SDSRecordType
     public let uniqueId: String
 
-    // Base class properties
+    // Properties
     public let dateCreated: Double
     public let info: Data
     public let referenceCount: Int
@@ -41,6 +43,14 @@ public struct KnownStickerPackRecord: SDSRecord {
 
     public static func columnName(_ column: KnownStickerPackRecord.CodingKeys, fullyQualified: Bool = false) -> String {
         return fullyQualified ? "\(databaseTableName).\(column.rawValue)" : column.rawValue
+    }
+
+    public func didInsert(with rowID: Int64, for column: String?) {
+        guard let delegate = delegate else {
+            owsFailDebug("Missing delegate.")
+            return
+        }
+        delegate.updateRowId(rowID)
     }
 }
 
@@ -95,7 +105,8 @@ extension KnownStickerPack {
             let info: StickerPackInfo = try SDSDeserialization.unarchive(infoSerialized, name: "info")
             let referenceCount: Int = record.referenceCount
 
-            return KnownStickerPack(uniqueId: uniqueId,
+            return KnownStickerPack(grdbId: recordId,
+                                    uniqueId: uniqueId,
                                     dateCreated: dateCreated,
                                     info: info,
                                     referenceCount: referenceCount)
@@ -133,19 +144,51 @@ extension KnownStickerPack: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension KnownStickerPack: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == KnownStickerPack.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let dateCreated: Date = modelToCopy.dateCreated
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let info: StickerPackInfo = try DeepCopies.deepCopy(modelToCopy.info)
+            let referenceCount: Int = modelToCopy.referenceCount
+
+            return KnownStickerPack(grdbId: id,
+                                    uniqueId: uniqueId,
+                                    dateCreated: dateCreated,
+                                    info: info,
+                                    referenceCount: referenceCount)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension KnownStickerPackSerializer {
 
     // This defines all of the columns used in the table
     // where this model (and any subclasses) are persisted.
-    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey, columnIndex: 0)
-    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64, columnIndex: 1)
-    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true, columnIndex: 2)
-    // Base class properties
-    static let dateCreatedColumn = SDSColumnMetadata(columnName: "dateCreated", columnType: .double, columnIndex: 3)
-    static let infoColumn = SDSColumnMetadata(columnName: "info", columnType: .blob, columnIndex: 4)
-    static let referenceCountColumn = SDSColumnMetadata(columnName: "referenceCount", columnType: .int64, columnIndex: 5)
+    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey)
+    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64)
+    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true)
+    // Properties
+    static let dateCreatedColumn = SDSColumnMetadata(columnName: "dateCreated", columnType: .double)
+    static let infoColumn = SDSColumnMetadata(columnName: "info", columnType: .blob)
+    static let referenceCountColumn = SDSColumnMetadata(columnName: "referenceCount", columnType: .int64)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -169,14 +212,14 @@ public extension KnownStickerPack {
         sdsSave(saveMode: .insert, transaction: transaction)
     }
 
-    // This method is private; we should never use it directly.
-    // Instead, use anyUpdate(transaction:block:), so that we
-    // use the "update with" pattern.
-    private func anyUpdate(transaction: SDSAnyWriteTransaction) {
-        sdsSave(saveMode: .update, transaction: transaction)
-    }
-
-    @available(*, deprecated, message: "Use anyInsert() or anyUpdate() instead.")
+    // Avoid this method whenever feasible.
+    //
+    // If the record has previously been saved, this method does an overwriting
+    // update of the corresponding row, otherwise if it's a new record, this
+    // method inserts a new row.
+    //
+    // For performance, when possible, you should explicitly specify whether
+    // you are inserting or updating rather than calling this method.
     func anyUpsert(transaction: SDSAnyWriteTransaction) {
         let isInserting: Bool
         if KnownStickerPack.anyFetch(uniqueId: uniqueId, transaction: transaction) != nil {
@@ -227,7 +270,20 @@ public extension KnownStickerPack {
             block(dbCopy)
         }
 
-        dbCopy.anyUpdate(transaction: transaction)
+        dbCopy.sdsSave(saveMode: .update, transaction: transaction)
+    }
+
+    // This method is an alternative to `anyUpdate(transaction:block:)` methods.
+    //
+    // We should generally use `anyUpdate` to ensure we're not unintentionally
+    // clobbering other columns in the database when another concurrent update
+    // has occured.
+    //
+    // There are cases when this doesn't make sense, e.g. when  we know we've
+    // just loaded the model in the same transaction. In those cases it is
+    // safe and faster to do a "overwriting" update
+    func anyOverwritingUpdate(transaction: SDSAnyWriteTransaction) {
+        sdsSave(saveMode: .update, transaction: transaction)
     }
 
     func anyRemove(transaction: SDSAnyWriteTransaction) {
@@ -254,9 +310,11 @@ public extension KnownStickerPack {
 
 @objc
 public class KnownStickerPackCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<KnownStickerPackRecord>?
 
-    init(cursor: RecordCursor<KnownStickerPackRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<KnownStickerPackRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -298,10 +356,10 @@ public extension KnownStickerPack {
         let database = transaction.database
         do {
             let cursor = try KnownStickerPackRecord.fetchCursor(database)
-            return KnownStickerPackCursor(cursor: cursor)
+            return KnownStickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return KnownStickerPackCursor(cursor: nil)
+            return KnownStickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -507,11 +565,11 @@ public extension KnownStickerPack {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try KnownStickerPackRecord.fetchCursor(transaction.database, sqlRequest)
-            return KnownStickerPackCursor(cursor: cursor)
+            return KnownStickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
             Logger.error("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return KnownStickerPackCursor(cursor: nil)
+            return KnownStickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -548,16 +606,33 @@ class KnownStickerPackSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .knownStickerPack
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
+        // Properties
         let dateCreated: Double = archiveDate(model.dateCreated)
         let info: Data = requiredArchive(model.info)
         let referenceCount: Int = model.referenceCount
 
-        return KnownStickerPackRecord(id: id, recordType: recordType, uniqueId: uniqueId, dateCreated: dateCreated, info: info, referenceCount: referenceCount)
+        return KnownStickerPackRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, dateCreated: dateCreated, info: info, referenceCount: referenceCount)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension KnownStickerPack {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> KnownStickerPack {
+        guard let record = try asRecord() as? KnownStickerPackRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try KnownStickerPack.fromRecord(record)
+    }
+}
+#endif

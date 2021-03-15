@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.44.0</string>
+	<string>5.8.0</string>
 	<key>CFBundleVersion</key>
-	<string>2.44.0.20</string>
+	<string>5.8.0.0</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>
@@ -53,6 +53,10 @@
 	<dict>
 		<key>NSExtensionAttributes</key>
 		<dict>
+			<key>IntentsSupported</key>
+			<array>
+				<string>INSendMessageIntent</string>
+			</array>
 			<key>NSExtensionActivationRule</key>
 			<string>SUBQUERY (
                 extensionItems,
@@ -79,10 +83,6 @@
 	</array>
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleLightContent</string>
-	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
 </dict>

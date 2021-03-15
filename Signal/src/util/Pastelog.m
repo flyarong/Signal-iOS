@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "Pastelog.h"
 #import "Signal-Swift.h"
 #import "ThreadUtil.h"
 #import "zlib.h"
-#import <AFNetworking/AFNetworking.h>
+#import <AFNetworking/AFHTTPSessionManager.h>
 #import <SSZipArchive/SSZipArchive.h>
 #import <SignalCoreKit/Threading.h>
 #import <SignalMessaging/AttachmentSharing.h>
@@ -21,8 +21,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef void (^UploadDebugLogsSuccess)(NSURL *url);
-typedef void (^UploadDebugLogsFailure)(NSString *localizedErrorMessage);
+NSErrorDomain PastelogErrorDomain = @"PastelogErrorDomain";
+
+typedef NS_ERROR_ENUM(PastelogErrorDomain, PastelogError) {
+    PastelogErrorInvalidNetworkResponse = 10001,
+    PastelogErrorEmailFailed = 10002
+};
 
 #pragma mark -
 
@@ -72,8 +76,8 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
     __weak DebugLogUploader *weakSelf = self;
 
     NSURLSessionConfiguration *sessionConf = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-    AFHTTPSessionManager *sessionManager =
-        [[AFHTTPSessionManager alloc] initWithBaseURL:nil sessionConfiguration:sessionConf];
+    AFHTTPSessionManager *sessionManager = [[AFHTTPSessionManager alloc] initWithBaseURL:nil
+                                                                    sessionConfiguration:sessionConf];
     sessionManager.requestSerializer = [AFHTTPRequestSerializer serializer];
     sessionManager.responseSerializer = [AFJSONResponseSerializer serializer];
     NSString *urlString = @"https://debuglogs.org/";
@@ -123,7 +127,7 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
                     failWithError:OWSErrorWithCodeDescription(OWSErrorCodeDebugLogUploadFailed, @"Invalid response")];
                 return;
             }
-            
+
             // Add a file extension to the upload's key.
             NSString *fileExtension = strongSelf.fileUrl.lastPathComponent.pathExtension;
             if (fileExtension.length < 1) {
@@ -152,8 +156,8 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
 
     __weak DebugLogUploader *weakSelf = self;
     NSURLSessionConfiguration *sessionConf = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-    AFHTTPSessionManager *sessionManager =
-        [[AFHTTPSessionManager alloc] initWithBaseURL:nil sessionConfiguration:sessionConf];
+    AFHTTPSessionManager *sessionManager = [[AFHTTPSessionManager alloc] initWithBaseURL:nil
+                                                                    sessionConfiguration:sessionConf];
     sessionManager.requestSerializer = [AFHTTPRequestSerializer serializer];
     sessionManager.responseSerializer = [AFHTTPResponseSerializer serializer];
     [sessionManager POST:uploadUrl
@@ -199,8 +203,8 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
     if (statusCodeClass != 200) {
         OWSLogError(@"statusCode: %zd, %zd", statusCode, statusCodeClass);
         OWSLogError(@"headers: %@", httpResponse.allHeaderFields);
-        [self failWithError:[NSError errorWithDomain:@"PastelogKit"
-                                                code:10001
+        [self failWithError:[NSError errorWithDomain:PastelogErrorDomain
+                                                code:PastelogErrorInvalidNetworkResponse
                                             userInfo:@{ NSLocalizedDescriptionKey : @"Invalid response code." }]];
     }
 }
@@ -250,8 +254,6 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
 
 @interface Pastelog () <UIAlertViewDelegate>
 
-@property (nonatomic) UIAlertController *loadingAlert;
-
 @property (nonatomic) DebugLogUploader *currentUploader;
 
 @end
@@ -260,7 +262,7 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
 
 @implementation Pastelog
 
-+ (instancetype)sharedManager
++ (instancetype)shared
 {
     static Pastelog *sharedMyManager = nil;
     static dispatch_once_t onceToken;
@@ -314,62 +316,66 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
         }
     };
 
-    [[self sharedManager] uploadLogsWithUIWithSuccess:^(NSURL *url) {
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_TITLE", @"Title of the debug log alert.")
-                             message:NSLocalizedString(@"DEBUG_LOG_ALERT_MESSAGE", @"Message of the debug log alert.")
-                      preferredStyle:UIAlertControllerStyleAlert];
+    [[self shared] uploadLogsWithUIWithSuccess:^(NSURL *url) {
+        ActionSheetController *alert = [[ActionSheetController alloc]
+            initWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_TITLE", @"Title of the debug log alert.")
+                  message:NSLocalizedString(@"DEBUG_LOG_ALERT_MESSAGE", @"Message of the debug log alert.")];
         [alert
-            addAction:[UIAlertAction
-                                  actionWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_EMAIL",
+            addAction:[[ActionSheetAction alloc]
+                                    initWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_EMAIL",
                                                       @"Label for the 'email debug log' option of the debug log alert.")
                           accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"send_email")
-                                            style:UIAlertActionStyleDefault
-                                          handler:^(UIAlertAction *action) {
-                                              [self submitEmailWithLogUrl:url subject:@"Signal - iOS Debug Log"];
+                                            style:ActionSheetActionStyleDefault
+                                          handler:^(ActionSheetAction *action) {
+                                              [ComposeSupportEmailOperation
+                                                  sendEmailWithDefaultErrorHandlingWithSupportFilter:
+                                                      @"Signal - iOS Debug Log"
+                                                                                              logUrl:url];
                                               completion();
                                           }]];
-        [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_COPY_LINK",
-                                                            @"Label for the 'copy link' option of the debug log alert.")
-                                accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"copy_link")
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *action) {
-                                                    UIPasteboard *pb = [UIPasteboard generalPasteboard];
-                                                    [pb setString:url.absoluteString];
+        [alert addAction:[[ActionSheetAction alloc]
+                                       initWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_COPY_LINK",
+                                                         @"Label for the 'copy link' option of the debug log alert.")
+                             accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"copy_link")
+                                               style:ActionSheetActionStyleDefault
+                                             handler:^(ActionSheetAction *action) {
+                                                 UIPasteboard *pb = [UIPasteboard generalPasteboard];
+                                                 [pb setString:url.absoluteString];
 
-                                                    completion();
-                                                }]];
+                                                 completion();
+                                             }]];
 #ifdef DEBUG
         [alert
-            addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_SEND_TO_SELF",
-                                                         @"Label for the 'send to self' option of the debug log alert.")
-                             accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"send_to_self")
-                                               style:UIAlertActionStyleDefault
-                                             handler:^(UIAlertAction *action) {
-                                                 [Pastelog.sharedManager sendToSelf:url];
-                                             }]];
+            addAction:[[ActionSheetAction alloc]
+                                    initWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_SEND_TO_SELF",
+                                                      @"Label for the 'send to self' option of the debug log alert.")
+                          accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"send_to_self")
+                                            style:ActionSheetActionStyleDefault
+                                          handler:^(ActionSheetAction *action) { [Pastelog.shared sendToSelf:url]; }]];
 #endif
         [alert
-            addAction:
-                [UIAlertAction actionWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_BUG_REPORT",
+            addAction:[[ActionSheetAction
+                          alloc] initWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_BUG_REPORT",
                                                    @"Label for the 'Open a Bug Report' option of the debug log alert.")
-                       accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"submit_bug_report")
-                                         style:UIAlertActionStyleDefault
-                                       handler:^(UIAlertAction *action) {
-                                           [Pastelog.sharedManager prepareRedirection:url completion:completion];
-                                       }]];
-        [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_SHARE",
-                                                            @"Label for the 'Share' option of the debug log alert.")
-                                accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"share")
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *action) {
-                                                    [AttachmentSharing showShareUIForText:url.absoluteString
-                                                                               completion:completion];
-                                                }]];
-        [alert addAction:[OWSAlerts cancelAction]];
+                          accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"submit_bug_report")
+                                            style:ActionSheetActionStyleDefault
+                                          handler:^(ActionSheetAction *action) {
+                                              [Pastelog.shared prepareRedirection:url completion:completion];
+                                          }]];
+        [alert addAction:[[ActionSheetAction alloc]
+                                       initWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_OPTION_SHARE",
+                                                         @"Label for the 'Share' option of the debug log alert.")
+                             accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"share")
+                                               style:ActionSheetActionStyleDefault
+                                             handler:^(ActionSheetAction *action) {
+                                                 [AttachmentSharing showShareUIForText:url.absoluteString
+                                                                                sender:nil
+                                                                            completion:completion];
+                                             }]];
+        [alert addAction:[OWSActionSheets cancelAction]];
         UIViewController *presentingViewController
             = UIApplication.sharedApplication.frontmostViewControllerIgnoringAlerts;
-        [presentingViewController presentAlert:alert animated:NO];
+        [presentingViewController presentActionSheet:alert];
     }];
 }
 
@@ -408,6 +414,11 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
                               }];
                           }];
                   }];
+}
+
++ (void)uploadLogsWithSuccess:(UploadDebugLogsSuccess)successParam failure:(UploadDebugLogsFailure)failureParam
+{
+    [[self shared] uploadLogsWithSuccess:successParam failure:failureParam];
 }
 
 - (void)uploadLogsWithSuccess:(UploadDebugLogsSuccess)successParam failure:(UploadDebugLogsFailure)failureParam {
@@ -500,57 +511,13 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
 
 + (void)showFailureAlertWithMessage:(NSString *)message
 {
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:NSLocalizedString(@"DEBUG_LOG_ALERT_TITLE",
-                                     @"Title of the alert shown for failures while uploading debug logs.")
-                         message:message
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"OK", @"")
-                            accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"ok")
-                                              style:UIAlertActionStyleDefault
-                                            handler:nil]];
+    ActionSheetController *alert = [[ActionSheetController alloc] initWithTitle:nil message:message];
+    [alert addAction:[[ActionSheetAction alloc] initWithTitle:CommonStrings.okButton
+                                      accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"ok")
+                                                        style:ActionSheetActionStyleDefault
+                                                      handler:nil]];
     UIViewController *presentingViewController = UIApplication.sharedApplication.frontmostViewControllerIgnoringAlerts;
-    [presentingViewController presentAlert:alert animated:NO];
-}
-
-#pragma mark Logs submission
-
-+ (void)submitEmailWithLogUrl:(nullable NSURL *)url subject:(NSString *)subject
-{
-    NSString *emailAddress = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"LOGS_EMAIL"];
-
-    NSMutableString *body = [NSMutableString new];
-
-    [body appendString:@"Tell us about the issue: \n\n\n"];
-    [body appendString:@"Generated Report: \n"];
-    [body appendFormat:@"Subject: %@ \n", subject];
-
-    [body
-        appendFormat:@"Device: %@ (%@)\n", UIDevice.currentDevice.model, [NSString stringFromSysctlKey:@"hw.machine"]];
-    [body appendFormat:@"iOS Version: %@ (%@)\n",
-          [UIDevice currentDevice].systemVersion,
-          [NSString stringFromSysctlKey:@"kern.osversion"]];
-
-    [body appendFormat:@"Signal Version: %@ \n", [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]];
-    if (url != nil) {
-        [body appendFormat:@"Log URL: %@ \n", url];
-    }
-
-    NSString *escapedSubject =
-        [subject stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-
-    NSString *escapedBody =
-        [body stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-
-    NSString *urlString =
-        [NSString stringWithFormat:@"mailto:%@?subject=%@&body=%@", emailAddress, escapedSubject, escapedBody];
-
-    BOOL success = [UIApplication.sharedApplication openURL:[NSURL URLWithString:urlString]];
-    if (!success) {
-        OWSLogError(@"Could not open Email app.");
-        [OWSAlerts showErrorAlertWithMessage:NSLocalizedString(@"DEBUG_LOG_COULD_NOT_EMAIL",
-                                                 @"Error indicating that the app could not launch the Email app.")];
-    }
+    [presentingViewController presentActionSheet:alert];
 }
 
 - (void)prepareRedirection:(NSURL *)url completion:(SubmitDebugLogsCompletion)completion
@@ -560,18 +527,17 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
     UIPasteboard *pb = [UIPasteboard generalPasteboard];
     [pb setString:url.absoluteString];
 
-    UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:NSLocalizedString(@"DEBUG_LOG_GITHUB_ISSUE_ALERT_TITLE",
-                                                        @"Title of the alert before redirecting to GitHub Issues.")
-                                            message:NSLocalizedString(@"DEBUG_LOG_GITHUB_ISSUE_ALERT_MESSAGE",
-                                                        @"Message of the alert before redirecting to GitHub Issues.")
-                                     preferredStyle:UIAlertControllerStyleAlert];
+    ActionSheetController *alert =
+        [[ActionSheetController alloc] initWithTitle:NSLocalizedString(@"DEBUG_LOG_GITHUB_ISSUE_ALERT_TITLE",
+                                                         @"Title of the alert before redirecting to GitHub Issues.")
+                                             message:NSLocalizedString(@"DEBUG_LOG_GITHUB_ISSUE_ALERT_MESSAGE",
+                                                         @"Message of the alert before redirecting to GitHub Issues.")];
     [alert
-        addAction:[UIAlertAction
-                              actionWithTitle:NSLocalizedString(@"OK", @"")
+        addAction:[[ActionSheetAction alloc]
+                                initWithTitle:CommonStrings.okButton
                       accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"ok")
-                                        style:UIAlertActionStyleDefault
-                                      handler:^(UIAlertAction *action) {
+                                        style:ActionSheetActionStyleDefault
+                                      handler:^(ActionSheetAction *action) {
                                           [UIApplication.sharedApplication
                                               openURL:[NSURL
                                                           URLWithString:[[NSBundle mainBundle]
@@ -580,7 +546,7 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
                                           completion();
                                       }]];
     UIViewController *presentingViewController = UIApplication.sharedApplication.frontmostViewControllerIgnoringAlerts;
-    [presentingViewController presentAlert:alert animated:NO];
+    [presentingViewController presentActionSheet:alert];
 }
 
 - (void)sendToSelf:(NSURL *)url
@@ -592,12 +558,13 @@ typedef void (^DebugLogUploadFailure)(DebugLogUploader *uploader, NSError *error
 
     DispatchMainThreadSafe(^{
         __block TSThread *thread = nil;
-        [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+        DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
             thread = [TSContactThread getOrCreateThreadWithContactAddress:recipientAddress transaction:transaction];
-        }];
+        });
         [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
-            [ThreadUtil enqueueMessageWithText:url.absoluteString
-                                      inThread:thread
+            [ThreadUtil enqueueMessageWithBody:[[MessageBody alloc] initWithText:url.absoluteString
+                                                                          ranges:MessageBodyRanges.empty]
+                                        thread:thread
                               quotedReplyModel:nil
                               linkPreviewDraft:nil
                                    transaction:transaction];

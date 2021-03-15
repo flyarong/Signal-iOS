@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -55,24 +55,21 @@ class TSAttachmentPointerSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .attachmentPointer
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
+        // Properties
         let albumMessageId: String? = model.albumMessageId
-        let attachmentSchemaVersion: UInt = model.attachmentSchemaVersion
         let attachmentType: TSAttachmentType = model.attachmentType
+        let blurHash: String? = model.blurHash
         let byteCount: UInt32 = model.byteCount
         let caption: String? = model.caption
         let contentType: String = model.contentType
         let encryptionKey: Data? = model.encryptionKey
-        let isDownloaded: Bool = model.isDownloaded
         let serverId: UInt64 = model.serverId
         let sourceFilename: String? = model.sourceFilename
-
-        // Subclass properties
         let cachedAudioDurationSeconds: Double? = nil
         let cachedImageHeight: Double? = nil
         let cachedImageWidth: Double? = nil
@@ -84,11 +81,13 @@ class TSAttachmentPointerSerializer: SDSSerializer {
         let lazyRestoreFragmentId: String? = model.lazyRestoreFragmentId
         let localRelativeFilePath: String? = nil
         let mediaSize: Data? = optionalArchive(model.mediaSize)
-        let mostRecentFailureLocalizedText: String? = model.mostRecentFailureLocalizedText
         let pointerType: TSAttachmentPointerType? = model.pointerType
-        let shouldAlwaysPad: Bool? = nil
         let state: TSAttachmentPointerState? = model.state
+        let uploadTimestamp: UInt64 = model.uploadTimestamp
+        let cdnKey: String = model.cdnKey
+        let cdnNumber: UInt32 = model.cdnNumber
+        let isAnimatedCached: Bool? = nil
 
-        return AttachmentRecord(id: id, recordType: recordType, uniqueId: uniqueId, albumMessageId: albumMessageId, attachmentSchemaVersion: attachmentSchemaVersion, attachmentType: attachmentType, byteCount: byteCount, caption: caption, contentType: contentType, encryptionKey: encryptionKey, isDownloaded: isDownloaded, serverId: serverId, sourceFilename: sourceFilename, cachedAudioDurationSeconds: cachedAudioDurationSeconds, cachedImageHeight: cachedImageHeight, cachedImageWidth: cachedImageWidth, creationTimestamp: creationTimestamp, digest: digest, isUploaded: isUploaded, isValidImageCached: isValidImageCached, isValidVideoCached: isValidVideoCached, lazyRestoreFragmentId: lazyRestoreFragmentId, localRelativeFilePath: localRelativeFilePath, mediaSize: mediaSize, mostRecentFailureLocalizedText: mostRecentFailureLocalizedText, pointerType: pointerType, shouldAlwaysPad: shouldAlwaysPad, state: state)
+        return AttachmentRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, albumMessageId: albumMessageId, attachmentType: attachmentType, blurHash: blurHash, byteCount: byteCount, caption: caption, contentType: contentType, encryptionKey: encryptionKey, serverId: serverId, sourceFilename: sourceFilename, cachedAudioDurationSeconds: cachedAudioDurationSeconds, cachedImageHeight: cachedImageHeight, cachedImageWidth: cachedImageWidth, creationTimestamp: creationTimestamp, digest: digest, isUploaded: isUploaded, isValidImageCached: isValidImageCached, isValidVideoCached: isValidVideoCached, lazyRestoreFragmentId: lazyRestoreFragmentId, localRelativeFilePath: localRelativeFilePath, mediaSize: mediaSize, pointerType: pointerType, state: state, uploadTimestamp: uploadTimestamp, cdnKey: cdnKey, cdnNumber: cdnNumber, isAnimatedCached: isAnimatedCached)
     }
 }

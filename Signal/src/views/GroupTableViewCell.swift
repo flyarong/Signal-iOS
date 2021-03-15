@@ -1,19 +1,11 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
 import SignalServiceKit
 
 @objc class GroupTableViewCell: UITableViewCell {
-
-    // MARK: - Dependencies
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    // MARK: -
 
     private let avatarView = AvatarImageView()
     private let nameLabel = UILabel()
@@ -27,13 +19,13 @@ import SignalServiceKit
 
         // Font config
         nameLabel.font = .ows_dynamicTypeBody
-        nameLabel.textColor = Theme.primaryColor
+        nameLabel.textColor = Theme.primaryTextColor
         subtitleLabel.font = UIFont.ows_regularFont(withSize: 11.0)
-        subtitleLabel.textColor = Theme.secondaryColor
+        subtitleLabel.textColor = Theme.secondaryTextAndIconColor
 
         // Layout
 
-        avatarView.autoSetDimension(.width, toSize: CGFloat(kStandardAvatarSize))
+        avatarView.autoSetDimension(.width, toSize: CGFloat(kSmallAvatarSize))
         avatarView.autoPinToSquareAspectRatio()
 
         let textRows = UIStackView(arrangedSubviews: [nameLabel, subtitleLabel])
@@ -46,10 +38,11 @@ import SignalServiceKit
         columns.spacing = kContactCellAvatarTextMargin
 
         self.contentView.addSubview(columns)
-        columns.autoPinEdgesToSuperviewMargins()
+        columns.autoPinWidthToSuperviewMargins()
+        columns.autoPinHeightToSuperview(withMargin: 7)
 
         // Accessory Label
-        accessoryLabel.font = .ows_mediumFont(withSize: 13)
+        accessoryLabel.font = .ows_semiboldFont(withSize: 13)
         accessoryLabel.textColor = Theme.middleGrayColor
         accessoryLabel.textAlignment = .right
         accessoryLabel.isHidden = true
@@ -69,11 +62,10 @@ import SignalServiceKit
             self.nameLabel.text = MessageStrings.newGroupDefaultTitle
         }
 
-        let groupMembers = thread.groupModel.groupMembers
-        let groupMemberNames = groupMembers.map { contactsManager.displayName(for: $0) }.joined(separator: ", ")
-        self.subtitleLabel.text = groupMemberNames
+        let groupMembersCount = thread.groupModel.groupMembership.fullMembers.count
+        self.subtitleLabel.text = GroupViewUtils.formatGroupMembersLabel(memberCount: groupMembersCount)
 
-        self.avatarView.image = OWSAvatarBuilder.buildImage(thread: thread, diameter: kStandardAvatarSize)
+        self.avatarView.image = OWSAvatarBuilder.buildImage(thread: thread, diameter: kSmallAvatarSize)
 
         if let accessoryMessage = accessoryMessage, !accessoryMessage.isEmpty {
             accessoryLabel.text = accessoryMessage

@@ -1,11 +1,10 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSGroupAvatarBuilder.h"
 #import "OWSContactsManager.h"
 #import "TSGroupThread.h"
-#import "UIColor+OWS.h"
 #import <SignalCoreKit/NSData+OWS.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/SSKEnvironment.h>
@@ -48,6 +47,11 @@ NS_ASSUME_NONNULL_BEGIN
     return self.thread.groupModel.groupAvatarImage;
 }
 
+- (nullable UIImage *)buildSavedImageWithTransaction:(SDSAnyReadTransaction *)transaction
+{
+    return self.thread.groupModel.groupAvatarImage;
+}
+
 - (nullable UIImage *)buildDefaultImage
 {
     return [self.class defaultAvatarForGroupId:self.thread.groupModel.groupId
@@ -59,10 +63,11 @@ NS_ASSUME_NONNULL_BEGIN
                         conversationColorName:(NSString *)conversationColorName
                                      diameter:(NSUInteger)diameter
 {
-    NSString *cacheKey = [NSString stringWithFormat:@"%@-%d", groupId.hexadecimalString, Theme.isDarkThemeEnabled];
+    NSString *cacheKey = [NSString
+        stringWithFormat:@"%@-%d-%lu", groupId.hexadecimalString, Theme.isDarkThemeEnabled, (unsigned long)diameter];
 
     UIImage *_Nullable cachedAvatar =
-        [OWSGroupAvatarBuilder.contactsManager.avatarCache imageForKey:cacheKey diameter:(CGFloat)diameter];
+        [OWSGroupAvatarBuilder.contactsManager getImageFromAvatarCacheWithKey:cacheKey diameter:(CGFloat)diameter];
     if (cachedAvatar) {
         return cachedAvatar;
     }
@@ -80,19 +85,20 @@ NS_ASSUME_NONNULL_BEGIN
         return nil;
     }
 
-    [OWSGroupAvatarBuilder.contactsManager.avatarCache setImage:image forKey:cacheKey diameter:diameter];
+    [OWSGroupAvatarBuilder.contactsManager setImageForAvatarCache:image forKey:cacheKey diameter:diameter];
     return image;
 }
 
 + (nullable UIImage *)groupAvatarImageWithBackgroundColor:(UIColor *)backgroundColor diameter:(NSUInteger)diameter
 {
-    UIImage *icon = [UIImage imageNamed:@"group-avatar"];
-    // The group-avatar asset is designed for the kStandardAvatarSize.
-    // Adjust its size to reflect the actual output diameter.
-    CGFloat scaling = diameter / (CGFloat)kStandardAvatarSize;
+    UIImage *icon = [UIImage imageNamed:@"group-outline-256"];
+    // Adjust asset size to reflect the output diameter.
+    CGFloat scaling = diameter * 0.003f;
     CGSize iconSize = CGSizeScale(icon.size, scaling);
-    return
-        [OWSAvatarBuilder avatarImageWithIcon:icon iconSize:iconSize backgroundColor:backgroundColor diameter:diameter];
+    return [OWSAvatarBuilder avatarImageWithIcon:icon
+                                        iconSize:iconSize
+                                 backgroundColor:backgroundColor
+                                        diameter:diameter];
 }
 
 @end

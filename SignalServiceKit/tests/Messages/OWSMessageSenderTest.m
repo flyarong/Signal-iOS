@@ -1,11 +1,11 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
+#import "MessageSender.h"
 #import "OWSDisappearingMessagesConfiguration.h"
 #import "OWSError.h"
 #import "OWSFakeNetworkManager.h"
-#import "OWSMessageSender.h"
 #import "OWSUploadOperation.h"
 #import "SSKBaseTestObjC.h"
 #import "TSAccountManager.h"
@@ -29,7 +29,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@interface OWSMessageSender (Testing)
+@interface MessageSender (Testing)
 
 @property (nonatomic) OWSUploadOperation *uploadingService;
 
@@ -41,11 +41,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@implementation OWSMessageSender (Testing)
+@implementation MessageSender (Testing)
 
 - (NSArray<NSDictionary *> *)deviceMessages:(TSOutgoingMessage *)message
                                forRecipient:(SignalRecipient *)recipient
-                                   inThread:(TSThread *)thread
+                                     thread:(TSThread *)thread
 {
     OWSLogInfo(@"[OWSFakeMessagesManager] Faking deviceMessages.");
     return @[];
@@ -126,7 +126,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@interface OWSMessageSenderFakeNetworkManager : OWSFakeNetworkManager
+@interface MessageSenderFakeNetworkManager : OWSFakeNetworkManager
 
 - (instancetype)init;
 - (instancetype)initWithSuccess:(BOOL)shouldSucceed NS_DESIGNATED_INITIALIZER;
@@ -137,7 +137,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@implementation OWSMessageSenderFakeNetworkManager
+@implementation MessageSenderFakeNetworkManager
 
 - (instancetype)initWithSuccess:(BOOL)shouldSucceed
 {
@@ -176,33 +176,33 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@interface OWSMessageSenderTest : SSKBaseTestObjC
+@interface MessageSenderTest : SSKBaseTestObjC
 
 @property (nonatomic) TSThread *thread;
 @property (nonatomic) TSOutgoingMessage *expiringMessage;
 @property (nonatomic) TSOutgoingMessage *unexpiringMessage;
-@property (nonatomic) OWSMessageSenderFakeNetworkManager *networkManager;
-@property (nonatomic) OWSMessageSender *successfulMessageSender;
-@property (nonatomic) OWSMessageSender *unsuccessfulMessageSender;
+@property (nonatomic) MessageSenderFakeNetworkManager *networkManager;
+@property (nonatomic) MessageSender *successfulMessageSender;
+@property (nonatomic) MessageSender *unsuccessfulMessageSender;
 
 @end
 
 #pragma mark -
 
-@implementation OWSMessageSenderTest
+@implementation MessageSenderTest
 
 - (void)setUp
 {
     [super setUp];
 
     // Hack to make sure we don't explode when sending sync message.
-    [[TSAccountManager sharedInstance] storeLocalNumber:@"+13231231234"];
+    [[TSAccountManager shared] storeLocalNumber:@"+13231231234"];
 
     self.thread = [[TSContactThread alloc] initWithUniqueId:@"fake-thread-id"];
     [self.thread save];
 
     self.unexpiringMessage = [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:1
-                                                                                inThread:self.thread
+                                                                                  thread:self.thread
                                                                              messageBody:@"outgoing message"
                                                                            attachmentIds:[NSMutableArray new]
                                                                         expiresInSeconds:0
@@ -215,7 +215,7 @@ NS_ASSUME_NONNULL_BEGIN
     [self.unexpiringMessage save];
 
     self.expiringMessage = [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:1
-                                                                              inThread:self.thread
+                                                                                thread:self.thread
                                                                            messageBody:@"outgoing message"
                                                                          attachmentIds:[NSMutableArray new]
                                                                       expiresInSeconds:30
@@ -230,14 +230,14 @@ NS_ASSUME_NONNULL_BEGIN
     OWSFakeContactsManager *contactsManager = [OWSFakeContactsManager new];
 
     // Successful Sending
-    TSNetworkManager *successfulNetworkManager = [[OWSMessageSenderFakeNetworkManager alloc] initWithSuccess:YES];
-    self.successfulMessageSender = [[OWSMessageSender alloc] initWithNetworkManager:successfulNetworkManager
-                                                                    contactsManager:contactsManager];
+    TSNetworkManager *successfulNetworkManager = [[MessageSenderFakeNetworkManager alloc] initWithSuccess:YES];
+    self.successfulMessageSender = [[MessageSender alloc] initWithNetworkManager:successfulNetworkManager
+                                                                 contactsManager:contactsManager];
 
     // Unsuccessful Sending
-    TSNetworkManager *unsuccessfulNetworkManager = [[OWSMessageSenderFakeNetworkManager alloc] initWithSuccess:NO];
-    self.unsuccessfulMessageSender = [[OWSMessageSender alloc] initWithNetworkManager:unsuccessfulNetworkManager
-                                                                      contactsManager:contactsManager];
+    TSNetworkManager *unsuccessfulNetworkManager = [[MessageSenderFakeNetworkManager alloc] initWithSuccess:NO];
+    self.unsuccessfulMessageSender = [[MessageSender alloc] initWithNetworkManager:unsuccessfulNetworkManager
+                                                                   contactsManager:contactsManager];
 }
 
 - (void)testExpiringMessageTimerStartsOnSuccessWhenDisappearingMessagesEnabled
@@ -247,13 +247,10 @@ NS_ASSUME_NONNULL_BEGIN
             [self.thread disappearingMessagesDurationWithTransaction:transaction];
         configuration = [configuration copyAsEnabledWithDurationSeconds:10];
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         [configuration anyUpsertWithTransaction:transaction];
-#pragma clang diagnostic pop
     }];
 
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
 
     // Sanity Check
     XCTAssertEqual(0, self.expiringMessage.expiresAt);
@@ -261,9 +258,15 @@ NS_ASSUME_NONNULL_BEGIN
     XCTestExpectation *messageStartedExpiration = [self expectationWithDescription:@"messageStartedExpiration"];
     [messageSender sendMessage:self.expiringMessage
         success:^() {
-            //FIXME remove sleep hack in favor of expiringMessage completion handler
-            sleep(2);
-            if (self.expiringMessage.expiresAt > 0) {
+            __block TSMessage *_Nullable reloadedMessage;
+            [self readWithBlock:^(SDSAnyReadTransaction *transaction) {
+                reloadedMessage = [TSMessage anyFetchMessageWithUniqueId:self.expiringMessage.uniqueId
+                                                             transaction:transaction];
+            }];
+            if (reloadedMessage == nil) {
+                XCTFail(@"Couldn't reload message.");
+                return;
+            } else if (reloadedMessage.hasPerConversationExpirationStarted) {
                 [messageStartedExpiration fulfill];
             } else {
                 XCTFail(@"Message expiration was supposed to start.");
@@ -286,13 +289,10 @@ NS_ASSUME_NONNULL_BEGIN
             [self.thread disappearingMessagesDurationWithTransaction:transaction];
         configuration = [configuration copyAsEnabledWithDurationSeconds:10];
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         [configuration anyUpsertWithTransaction:transaction];
-#pragma clang diagnostic pop
     }];
 
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
 
     XCTestExpectation *messageDidNotStartExpiration = [self expectationWithDescription:@"messageDidNotStartExpiration"];
     [messageSender sendMessageToService:self.unexpiringMessage
@@ -315,7 +315,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testExpiringMessageTimerDoesNotStartsOnFailure
 {
-    OWSMessageSender *messageSender = self.unsuccessfulMessageSender;
+    MessageSender *messageSender = self.unsuccessfulMessageSender;
 
     // Sanity Check
     XCTAssertEqual(0, self.expiringMessage.expiresAt);
@@ -338,7 +338,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testTextMessageIsMarkedAsSentOnSuccess
 {
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
 
     TSOutgoingMessage *message = [TSOutgoingMessage outgoingMessageInThread:self.thread
                                                                 messageBody:@"We want punks in the palace."
@@ -362,11 +362,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testMediaMessageIsMarkedAsSentOnSuccess
 {
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
     messageSender.uploadingService = [[OWSFakeUploadingService alloc] initWithSuccess:YES];
 
+    TSOutgoingMessageBuilder *messageBuilder = [[TSOutgoingMessageBuilder alloc] init];
     TSOutgoingMessage *message = [[TSOutgoingMessage alloc] initWithTimestamp:1
-                                                                     inThread:self.thread
+                                                                       thread:self.thread
                                                                   messageBody:@"We want punks in the palace."];
 
     XCTestExpectation *markedAsSent = [self expectationWithDescription:@"markedAsSent"];
@@ -390,11 +391,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testTextMessageIsMarkedAsUnsentOnFailure
 {
-    OWSMessageSender *messageSender = self.unsuccessfulMessageSender;
+    MessageSender *messageSender = self.unsuccessfulMessageSender;
     messageSender.uploadingService = [[OWSFakeUploadingService alloc] initWithSuccess:YES];
 
     TSOutgoingMessage *message = [[TSOutgoingMessage alloc] initWithTimestamp:1
-                                                                     inThread:self.thread
+                                                                       thread:self.thread
                                                                   messageBody:@"We want punks in the palace."];
 
     XCTestExpectation *markedAsUnsent = [self expectationWithDescription:@"markedAsUnsent"];
@@ -415,12 +416,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testMediaMessageIsMarkedAsUnsentOnFailureToSend
 {
-    OWSMessageSender *messageSender = self.unsuccessfulMessageSender;
+    MessageSender *messageSender = self.unsuccessfulMessageSender;
     // Assume that upload will go well, but that failure happens elsewhere in message sender.
     messageSender.uploadingService = [[OWSFakeUploadingService alloc] initWithSuccess:YES];
 
     TSOutgoingMessage *message = [[TSOutgoingMessage alloc] initWithTimestamp:1
-                                                                     inThread:self.thread
+                                                                       thread:self.thread
                                                                   messageBody:@"We want punks in the palace."];
 
     XCTestExpectation *markedAsUnsent = [self expectationWithDescription:@"markedAsUnsent"];
@@ -444,12 +445,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testMediaMessageIsMarkedAsUnsentOnFailureToUpload
 {
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
     // Assume that upload fails, but other sending stuff would succeed.
     messageSender.uploadingService = [[OWSFakeUploadingService alloc] initWithSuccess:NO];
 
     TSOutgoingMessage *message = [[TSOutgoingMessage alloc] initWithTimestamp:1
-                                                                     inThread:self.thread
+                                                                       thread:self.thread
                                                                   messageBody:@"We want punks in the palace."];
 
     XCTestExpectation *markedAsUnsent = [self expectationWithDescription:@"markedAsUnsent"];
@@ -473,23 +474,26 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testGroupSend
 {
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
 
-
-    NSData *groupIdData = [Cryptography generateRandomBytes:32];
     SignalRecipient *successfulRecipient =
         [[SignalRecipient alloc] initWithTextSecureIdentifier:@"successful-recipient-id" relay:nil];
     SignalRecipient *successfulRecipient2 =
         [[SignalRecipient alloc] initWithTextSecureIdentifier:@"successful-recipient-id2" relay:nil];
 
-    TSGroupModel *groupModel =
-        [[TSGroupModel alloc] initWithTitle:@"group title"
-                                    members:[@[ successfulRecipient.address, successfulRecipient2.address ] mutableCopy]
-                            groupAvatarData:nil
-                                    groupId:groupIdData];
-    TSGroupThread *groupThread = [TSGroupThread getOrCreateThreadWithGroupModel:groupModel];
+    __block TSGroupThread *thread;
+    [self writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+        thread = [GroupManager createGroupForTestsObjcWithMembers:@[
+            successfulRecipient.address,
+            successfulRecipient2.address,
+        ]
+                                                             name:@"group title"
+                                                       avatarData:nil
+                                                      transaction:transaction];
+    }];
+
     TSOutgoingMessage *message = [[TSOutgoingMessage alloc] initWithTimestamp:1
-                                                                     inThread:groupThread
+                                                                       thread:groupThread
                                                                   messageBody:@"We want punks in the palace."];
 
     XCTestExpectation *markedAsSent = [self expectationWithDescription:@"markedAsSent"];
@@ -513,7 +517,7 @@ NS_ASSUME_NONNULL_BEGIN
     SignalRecipient *recipient = [[SignalRecipient alloc] initWithTextSecureIdentifier:@"fake-recipient-id" relay:nil];
     [recipient save];
 
-    OWSMessageSender *messageSender = self.successfulMessageSender;
+    MessageSender *messageSender = self.successfulMessageSender;
 
     NSError *error;
     NSArray<SignalRecipient *> *recipients = [messageSender getRecipients:@[ recipient.address ] error:&error];

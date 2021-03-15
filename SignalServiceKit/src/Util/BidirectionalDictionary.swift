@@ -1,13 +1,13 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 @objc
 public final class AnyBidirectionalDictionary: NSObject, NSCoding {
-    fileprivate let forwardDictionary: Dictionary<AnyHashable, AnyHashable>
-    fileprivate let backwardDictionary: Dictionary<AnyHashable, AnyHashable>
+    fileprivate let forwardDictionary: [AnyHashable: AnyHashable]
+    fileprivate let backwardDictionary: [AnyHashable: AnyHashable]
 
     public init<ElementOne: Hashable, ElementTwo: Hashable>(_ bidirectionalDictionary: BidirectionalDictionary<ElementOne, ElementTwo>) {
         forwardDictionary = .init(uniqueKeysWithValues: bidirectionalDictionary.forwardDictionary.map {
@@ -42,7 +42,7 @@ public struct BidirectionalDictionary<ElementOne: Hashable, ElementTwo: Hashable
     fileprivate typealias BackwardType = [ElementTwo: ElementOne]
 
     fileprivate var forwardDictionary: ForwardType
-    fileprivate var backwardDictionary: [ElementTwo: ElementOne]
+    fileprivate var backwardDictionary: BackwardType
 
     public init() {
         forwardDictionary = [:]
@@ -69,10 +69,11 @@ public struct BidirectionalDictionary<ElementOne: Hashable, ElementTwo: Hashable
             return forwardDictionary[key]
         }
         set {
+            if let previousValue = forwardDictionary[key] {
+                backwardDictionary[previousValue] = nil
+            }
+
             guard let newValue = newValue else {
-                if let previousValue = forwardDictionary[key] {
-                    backwardDictionary[previousValue] = nil
-                }
                 forwardDictionary[key] = nil
                 return
             }
@@ -87,10 +88,11 @@ public struct BidirectionalDictionary<ElementOne: Hashable, ElementTwo: Hashable
             return backwardDictionary[key]
         }
         set {
+            if let previousValue = backwardDictionary[key] {
+                forwardDictionary[previousValue] = nil
+            }
+
             guard let newValue = newValue else {
-                if let previousValue = backwardDictionary[key] {
-                    forwardDictionary[previousValue] = nil
-                }
                 backwardDictionary[key] = nil
                 return
             }
@@ -103,6 +105,14 @@ public struct BidirectionalDictionary<ElementOne: Hashable, ElementTwo: Hashable
     public var count: Int {
         assert(forwardDictionary.count == backwardDictionary.count)
         return forwardDictionary.count
+    }
+
+    public var forwardKeys: [ElementOne] {
+        return Array(forwardDictionary.keys)
+    }
+
+    public var backwardKeys: [ElementTwo] {
+        return Array(backwardDictionary.keys)
     }
 }
 
@@ -120,7 +130,7 @@ extension BidirectionalDictionary: Collection {
     }
 
     public subscript (position: Index) -> Iterator.Element {
-        precondition((startIndex ..< endIndex).contains(position), "out of bounds")
+        owsAssert((startIndex ..< endIndex).contains(position), "out of bounds")
         let element = forwardDictionary[position]
         return (element.key, element.value)
     }
@@ -174,3 +184,7 @@ extension BidirectionalDictionary: ExpressibleByDictionaryLiteral {
         self.init(uniqueKeysWithValues: elements)
     }
 }
+
+// MARK: -
+
+extension BidirectionalDictionary: Codable where ElementOne: Codable, ElementTwo: Codable {}

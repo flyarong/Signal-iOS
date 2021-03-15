@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -32,6 +32,7 @@ public class ConversationHeaderView: UIStackView {
         }
         set {
             self.titleIconView.image = newValue
+            self.titleIconView.tintColor = Theme.secondaryTextAndIconColor
             self.titleIconView.isHidden = newValue == nil
         }
     }
@@ -57,7 +58,7 @@ public class ConversationHeaderView: UIStackView {
     }
 
     @objc
-    public let titlePrimaryFont: UIFont =  UIFont.ows_boldFont(withSize: 17)
+    public let titlePrimaryFont: UIFont =  UIFont.ows_semiboldFont(withSize: 17)
     @objc
     public let titleSecondaryFont: UIFont =  UIFont.ows_regularFont(withSize: 9)
     @objc
@@ -69,9 +70,9 @@ public class ConversationHeaderView: UIStackView {
     private let avatarView: ConversationAvatarImageView
 
     @objc
-    public required init(thread: TSThread, contactsManager: OWSContactsManager) {
+    public required init(thread: TSThread) {
 
-        let avatarView = ConversationAvatarImageView(thread: thread, diameter: 36, contactsManager: contactsManager)
+        let avatarView = ConversationAvatarImageView(thread: thread, diameter: 36)
         self.avatarView = avatarView
         // remove default border on avatarView
         avatarView.layer.borderWidth = 0
@@ -83,7 +84,6 @@ public class ConversationHeaderView: UIStackView {
         titleLabel.setContentHuggingHigh()
 
         titleIconView = UIImageView()
-        titleIconView.tintColor = Theme.secondaryColor
         titleIconView.contentMode = .scaleAspectFit
         titleIconView.setCompressionResistanceHigh()
 
@@ -102,7 +102,7 @@ public class ConversationHeaderView: UIStackView {
         textRows.distribution = .fillProportionally
         textRows.spacing = 0
 
-        textRows.layoutMargins = UIEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        textRows.layoutMargins = UIEdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 0)
         textRows.isLayoutMarginsRelativeArrangement = true
 
         // low content hugging so that the text rows push container to the right bar button item(s)
@@ -110,7 +110,7 @@ public class ConversationHeaderView: UIStackView {
 
         super.init(frame: .zero)
 
-        self.layoutMargins = UIEdgeInsets(top: 4, left: 2, bottom: 4, right: 2)
+        self.layoutMargins = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         self.isLayoutMarginsRelativeArrangement = true
 
         self.axis = .horizontal
@@ -121,6 +121,8 @@ public class ConversationHeaderView: UIStackView {
 
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(didTapView))
         self.addGestureRecognizer(tapGesture)
+
+        NotificationCenter.default.addObserver(self, selector: #selector(themeDidChange), name: .ThemeDidChange, object: nil)
     }
 
     required public init(coder: NSCoder) {
@@ -137,8 +139,16 @@ public class ConversationHeaderView: UIStackView {
     }
 
     @objc
+    func themeDidChange() {
+        titleLabel.textColor = Theme.navbarTitleColor
+        subtitleLabel.textColor = Theme.navbarTitleColor
+    }
+
+    @objc
     public func updateAvatar() {
-        self.avatarView.updateImage()
+        databaseStorage.uiRead { transaction in
+            self.avatarView.updateImage(transaction: transaction)
+        }
     }
 
     // MARK: Delegate Methods

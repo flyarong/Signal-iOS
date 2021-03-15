@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "UIView+OWS.h"
@@ -10,9 +10,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-static inline CGFloat ScreenShortDimension()
+static inline CGFloat ApplicationShortDimension()
 {
-    return MIN([UIScreen mainScreen].bounds.size.width, [UIScreen mainScreen].bounds.size.height);
+    return MIN(CurrentAppContext().frame.size.width, CurrentAppContext().frame.size.height);
 }
 
 static const CGFloat kIPhone5ScreenWidth = 320.f;
@@ -20,16 +20,16 @@ static const CGFloat kIPhone7PlusScreenWidth = 414.f;
 
 CGFloat ScaleFromIPhone5To7Plus(CGFloat iPhone5Value, CGFloat iPhone7PlusValue)
 {
-    CGFloat screenShortDimension = ScreenShortDimension();
+    CGFloat applicationShortDimension = ApplicationShortDimension();
     return (CGFloat)round(CGFloatLerp(iPhone5Value,
         iPhone7PlusValue,
-        CGFloatClamp01(CGFloatInverseLerp(screenShortDimension, kIPhone5ScreenWidth, kIPhone7PlusScreenWidth))));
+        CGFloatClamp01(CGFloatInverseLerp(applicationShortDimension, kIPhone5ScreenWidth, kIPhone7PlusScreenWidth))));
 }
 
 CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
 {
-    CGFloat screenShortDimension = ScreenShortDimension();
-    return (CGFloat)round(iPhone5Value * screenShortDimension / kIPhone5ScreenWidth);
+    CGFloat applicationShortDimension = ApplicationShortDimension();
+    return (CGFloat)round(iPhone5Value * applicationShortDimension / kIPhone5ScreenWidth);
 }
 
 #pragma mark -
@@ -99,28 +99,6 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     return result;
 }
 
-- (NSArray<NSLayoutConstraint *> *)ows_autoPinToSuperviewEdges
-{
-    NSArray<NSLayoutConstraint *> *result = @[
-        [self autoPinEdgeToSuperviewEdge:ALEdgeLeft],
-        [self autoPinEdgeToSuperviewEdge:ALEdgeRight],
-        [self autoPinEdgeToSuperviewEdge:ALEdgeTop],
-        [self autoPinEdgeToSuperviewEdge:ALEdgeBottom],
-    ];
-    return result;
-}
-
-- (NSArray<NSLayoutConstraint *> *)ows_autoPinToSuperviewMargins
-{
-    NSArray<NSLayoutConstraint *> *result = @[
-        [self autoPinTopToSuperviewMargin],
-        [self autoPinLeadingToSuperviewMargin],
-        [self autoPinTrailingToSuperviewMargin],
-        [self autoPinBottomToSuperviewMargin],
-    ];
-    return result;
-}
-
 - (NSLayoutConstraint *)autoHCenterInSuperview
 {
     return [self autoAlignAxis:ALAxisVertical toSameAxisOfView:self.superview];
@@ -131,7 +109,17 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     return [self autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.superview];
 }
 
-- (void)autoPinWidthToWidthOfView:(UIView *)view
+- (void)autoPinEdgesToEdgesOfView:(UIView *)view
+{
+    OWSAssertDebug(view);
+
+    [self autoPinEdge:ALEdgeLeft toEdge:ALEdgeLeft ofView:view];
+    [self autoPinEdge:ALEdgeRight toEdge:ALEdgeRight ofView:view];
+    [self autoPinEdge:ALEdgeTop toEdge:ALEdgeTop ofView:view];
+    [self autoPinEdge:ALEdgeBottom toEdge:ALEdgeBottom ofView:view];
+}
+
+- (void)autoPinHorizontalEdgesToEdgesOfView:(UIView *)view
 {
     OWSAssertDebug(view);
 
@@ -139,7 +127,7 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     [self autoPinEdge:ALEdgeRight toEdge:ALEdgeRight ofView:view];
 }
 
-- (void)autoPinHeightToHeightOfView:(UIView *)view
+- (void)autoPinVerticalEdgesToEdgesOfView:(UIView *)view
 {
     OWSAssertDebug(view);
 
@@ -422,9 +410,14 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     return constraint;
 }
 
-- (NSTextAlignment)textAlignmentUnnatural
++ (NSTextAlignment)textAlignmentUnnatural
 {
     return (CurrentAppContext().isRTL ? NSTextAlignmentLeft : NSTextAlignmentRight);
+}
+
+- (NSTextAlignment)textAlignmentUnnatural
+{
+    return UIView.textAlignmentUnnatural;
 }
 
 - (void)setHLayoutMargins:(CGFloat)value
@@ -530,17 +523,27 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
         OWSLogVerbose(@"%@ ----", label);
     });
 
-    UIResponder *responder = self;
+    [self traverseViewHierarchyUpwardWithVisitor:^(UIView *subview) { [subview logFrameLaterWithLabel:@"\t"]; }];
+}
+
+- (void)traverseViewHierarchyUpwardWithVisitor:(UIViewVisitorBlock)visitor
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(visitor);
+
+    visitor(self);
+
+    UIResponder *_Nullable responder = self;
     while (responder) {
         if ([responder isKindOfClass:[UIView class]]) {
             UIView *view = (UIView *)responder;
-            [view logFrameLaterWithLabel:@"\t"];
+            visitor(view);
         }
         responder = responder.nextResponder;
     }
 }
 
-- (void)traverseViewHierarchyWithVisitor:(UIViewVisitorBlock)visitor
+- (void)traverseViewHierarchyDownwardWithVisitor:(UIViewVisitorBlock)visitor
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(visitor);
@@ -548,7 +551,7 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     visitor(self);
 
     for (UIView *subview in self.subviews) {
-        [subview traverseViewHierarchyWithVisitor:visitor];
+        [subview traverseViewHierarchyDownwardWithVisitor:visitor];
     }
 }
 
@@ -577,6 +580,20 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
 #pragma mark -
 
 @implementation UIStackView (OWS)
+
+- (void)addHairlineWithColor:(UIColor *)color
+{
+    [self insertHairlineWithColor:color atIndex:self.arrangedSubviews.count];
+}
+
+- (void)insertHairlineWithColor:(UIColor *)color atIndex:(NSInteger)index
+{
+    UIView *hairlineView = [[UIView alloc] init];
+    hairlineView.backgroundColor = color;
+    [hairlineView autoSetDimension:ALDimensionHeight toSize:1];
+
+    [self insertArrangedSubview:hairlineView atIndex:index];
+}
 
 - (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor
 {
@@ -611,22 +628,6 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     [borderView setCompressionResistanceLow];
     [borderView setContentHuggingLow];
     return borderView;
-}
-
-@end
-
-#pragma mark -
-
-@implementation UIAlertAction (OWS)
-
-+ (instancetype)actionWithTitle:(nullable NSString *)title
-        accessibilityIdentifier:(nullable NSString *)accessibilityIdentifier
-                          style:(UIAlertActionStyle)style
-                        handler:(void (^__nullable)(UIAlertAction *action))handler
-{
-    UIAlertAction *action = [UIAlertAction actionWithTitle:title style:style handler:handler];
-    action.accessibilityIdentifier = accessibilityIdentifier;
-    return action;
 }
 
 @end

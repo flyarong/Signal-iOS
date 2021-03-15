@@ -1,8 +1,9 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "ShareAppExtensionContext.h"
+#import <SignalMessaging/DebugLogger.h>
 #import <SignalMessaging/UIViewController+OWS.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSConstants.h>
@@ -76,7 +77,14 @@ NS_ASSUME_NONNULL_BEGIN
 
     self.reportedApplicationState = UIApplicationStateActive;
 
-    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationDidBecomeActiveNotification object:nil];
+    [BenchManager benchWithTitle:@"Slow post DidBecomeActive"
+                 logIfLongerThan:0.01
+                 logInProduction:YES
+                           block:^{
+                               [NSNotificationCenter.defaultCenter
+                                   postNotificationName:OWSApplicationDidBecomeActiveNotification
+                                                 object:nil];
+                           }];
 }
 
 - (void)extensionHostWillResignActive:(NSNotification *)notification
@@ -88,7 +96,14 @@ NS_ASSUME_NONNULL_BEGIN
     OWSLogInfo(@"");
     [DDLog flushLog];
 
-    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationWillResignActiveNotification object:nil];
+    [BenchManager benchWithTitle:@"Slow post WillResignActive"
+                 logIfLongerThan:0.01
+                 logInProduction:YES
+                           block:^{
+                               [NSNotificationCenter.defaultCenter
+                                   postNotificationName:OWSApplicationWillResignActiveNotification
+                                                 object:nil];
+                           }];
 }
 
 - (void)extensionHostDidEnterBackground:(NSNotification *)notification
@@ -100,7 +115,14 @@ NS_ASSUME_NONNULL_BEGIN
 
     self.reportedApplicationState = UIApplicationStateBackground;
 
-    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationDidEnterBackgroundNotification object:nil];
+    [BenchManager benchWithTitle:@"Slow post DidEnterBackground"
+                 logIfLongerThan:0.01
+                 logInProduction:YES
+                           block:^{
+                               [NSNotificationCenter.defaultCenter
+                                   postNotificationName:OWSApplicationDidEnterBackgroundNotification
+                                                 object:nil];
+                           }];
 }
 
 - (void)extensionHostWillEnterForeground:(NSNotification *)notification
@@ -111,7 +133,14 @@ NS_ASSUME_NONNULL_BEGIN
 
     self.reportedApplicationState = UIApplicationStateInactive;
 
-    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationWillEnterForegroundNotification object:nil];
+    [BenchManager benchWithTitle:@"Slow post WillEnterForeground"
+                 logIfLongerThan:0.01
+                 logInProduction:YES
+                           block:^{
+                               [NSNotificationCenter.defaultCenter
+                                   postNotificationName:OWSApplicationWillEnterForegroundNotification
+                                                 object:nil];
+                           }];
 }
 
 #pragma mark -
@@ -124,6 +153,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)isMainAppAndActive
 {
     return NO;
+}
+
+- (UIApplicationState)mainApplicationStateOnLaunch
+{
+    OWSFailDebug(@"Not main app.");
+
+    return UIApplicationStateInactive;
 }
 
 - (BOOL)isRTL
@@ -171,7 +207,7 @@ NS_ASSUME_NONNULL_BEGIN
     OWSAssertDebug(backgroundTaskIdentifier == UIBackgroundTaskInvalid);
 }
 
-- (void)ensureSleepBlocking:(BOOL)shouldBeBlocking blockingObjects:(NSArray<id> *)blockingObjects
+- (void)ensureSleepBlocking:(BOOL)shouldBeBlocking blockingObjectsDescription:(NSString *)blockingObjectsDescription
 {
     OWSLogDebug(@"Ignoring request to block sleep.");
 }
@@ -188,7 +224,12 @@ NS_ASSUME_NONNULL_BEGIN
     return [self.rootViewController findFrontmostViewController:YES];
 }
 
-- (nullable UIAlertAction *)openSystemSettingsActionWithCompletion:(void (^_Nullable)(void))completion
+- (void)openSystemSettings
+{
+    return;
+}
+
+- (nullable ActionSheetAction *)openSystemSettingsActionWithCompletion:(void (^_Nullable)(void))completion
 {
     return nil;
 }
@@ -216,6 +257,11 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     return _buildTime;
+}
+
+- (CGRect)frame
+{
+    return self.rootViewController.view.frame;
 }
 
 - (UIInterfaceOrientation)interfaceOrientation
@@ -249,7 +295,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)appSharedDataDirectoryPath
 {
     NSURL *groupContainerDirectoryURL =
-        [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:SignalApplicationGroup];
+        [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:TSConstants.applicationGroup];
     return [groupContainerDirectoryURL path];
 }
 
@@ -260,7 +306,37 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (NSUserDefaults *)appUserDefaults
 {
-    return [[NSUserDefaults alloc] initWithSuiteName:SignalApplicationGroup];
+    return [[NSUserDefaults alloc] initWithSuiteName:TSConstants.applicationGroup];
+}
+
+- (BOOL)canPresentNotifications
+{
+    return NO;
+}
+
+- (BOOL)shouldProcessIncomingMessages
+{
+    return NO;
+}
+
+- (BOOL)hasUI
+{
+    return YES;
+}
+
+- (BOOL)didLastLaunchNotTerminate
+{
+    return NO;
+}
+
+- (BOOL)hasActiveCall
+{
+    return NO;
+}
+
+- (NSString *)debugLogsDirPath
+{
+    return DebugLogger.shareExtensionDebugLogsDirPath;
 }
 
 @end

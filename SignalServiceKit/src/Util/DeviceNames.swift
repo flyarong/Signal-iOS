@@ -1,15 +1,15 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import Curve25519Kit
 import AxolotlKit
 
-@objc
-public enum DeviceNameError: Int, Error {
+public enum DeviceNameError: Error {
     case assertionFailure
     case invalidInput
+    case cryptError(_ description: String)
 }
 
 @objc
@@ -64,12 +64,7 @@ public class DeviceNames: NSObject {
         let protoBuilder = SignalIOSProtoDeviceName.builder(ephemeralPublic: keyData as Data,
                                                             syntheticIv: syntheticIV,
                                                             ciphertext: ciphertext.ciphertext)
-        let protoData = try protoBuilder.buildSerializedData()
-
-        // NOTE: This uses Data's foundation method rather than the NSData's SSK method.
-        let protoDataBase64 = protoData.base64EncodedData()
-
-        return protoDataBase64
+        return try protoBuilder.buildSerializedData()
     }
 
     private class func computeSyntheticIV(masterSecret: Data,
@@ -122,25 +117,12 @@ public class DeviceNames: NSObject {
     }
 
     @objc
-    public class func decryptDeviceName(base64Data: Data,
-                                        identityKeyPair: ECKeyPair) throws -> String {
-
-        guard let protoData = Data(base64Encoded: base64Data) else {
-            // Not necessarily an error; might be a legacy device name.
-            throw DeviceNameError.invalidInput
-        }
-
-        return try decryptDeviceName(protoData: protoData,
-                                     identityKeyPair: identityKeyPair)
-    }
-
-    @objc
     public class func decryptDeviceName(protoData: Data,
                                         identityKeyPair: ECKeyPair) throws -> String {
 
         let proto: SignalIOSProtoDeviceName
         do {
-            proto = try SignalIOSProtoDeviceName.parseData(protoData)
+            proto = try SignalIOSProtoDeviceName(serializedData: protoData)
         } catch {
             // Not necessarily an error; might be a legacy device name.
             Logger.error("failed to parse proto")
@@ -190,12 +172,10 @@ public class DeviceNames: NSObject {
         // An all-zeros IV corresponds to an AES CTR counter of zero.
         let ciphertextIV = Data(count: Int(kAES256CTR_IVLength))
         guard let ciphertextKey = OWSAES256Key(data: cipherKey) else {
-            owsFailDebug("Invalid cipher key.")
-            throw DeviceNameError.assertionFailure
+            throw DeviceNameError.cryptError("Invalid cipher key.")
         }
         guard let plaintextData = Cryptography.decryptAESCTR(cipherText: ciphertext, initializationVector: ciphertextIV, key: ciphertextKey) else {
-            owsFailDebug("Could not decrypt cipher text.")
-            throw DeviceNameError.assertionFailure
+            throw DeviceNameError.cryptError("Could not decrypt cipher text.")
         }
 
         // Verify the synthetic IV was correct.
@@ -203,8 +183,7 @@ public class DeviceNames: NSObject {
         let computedSyntheticIV = try computeSyntheticIV(masterSecret: masterSecret,
                                                          plaintextData: plaintextData)
         guard receivedSyntheticIV.ows_constantTimeIsEqual(to: computedSyntheticIV) else {
-            owsFailDebug("Synthetic IV did not match.")
-            throw DeviceNameError.assertionFailure
+            throw DeviceNameError.cryptError("Synthetic IV did not match.")
         }
 
         guard let plaintext = String(bytes: plaintextData, encoding: .utf8) else {

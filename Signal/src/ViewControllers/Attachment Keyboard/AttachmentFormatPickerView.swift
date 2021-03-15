@@ -1,11 +1,12 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
+import PromiseKit
 
 protocol AttachmentFormatPickerDelegate: class {
-    func didTapCamera(withPhotoCapture: PhotoCapture?)
+    func didTapCamera()
     func didTapGif()
     func didTapFile()
     func didTapContact()
@@ -23,7 +24,6 @@ class AttachmentFormatPickerView: UICollectionView {
     }
 
     private let collectionViewFlowLayout = UICollectionViewFlowLayout()
-    private var photoCapture: PhotoCapture?
 
     init() {
         super.init(frame: .zero, collectionViewLayout: collectionViewFlowLayout)
@@ -42,26 +42,6 @@ class AttachmentFormatPickerView: UICollectionView {
         collectionViewFlowLayout.minimumLineSpacing = 6
 
         updateLayout()
-    }
-
-    deinit {
-        stopCameraPreview()
-    }
-
-    func startCameraPreview() {
-        guard photoCapture == nil else { return }
-
-        let photoCapture = PhotoCapture()
-        self.photoCapture = photoCapture
-
-        photoCapture.startVideoCapture().done { [weak self] in
-            self?.reloadData()
-        }.retainUntilComplete()
-    }
-
-    func stopCameraPreview() {
-        photoCapture?.stopCapture().retainUntilComplete()
-        photoCapture = nil
     }
 
     private func updateLayout() {
@@ -94,11 +74,7 @@ extension AttachmentFormatPickerView: UICollectionViewDelegate {
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         switch AttachmentType.allCases[indexPath.row] {
         case .camera:
-            // Since we're trying to pass on our prepared capture session to
-            // the camera view, nil it out so we don't try and stop it here.
-            let photoCapture = self.photoCapture
-            self.photoCapture = nil
-            attachmentFormatPickerDelegate?.didTapCamera(withPhotoCapture: photoCapture)
+            attachmentFormatPickerDelegate?.didTapCamera()
         case .contact:
             attachmentFormatPickerDelegate?.didTapContact()
         case .file:
@@ -129,7 +105,7 @@ extension AttachmentFormatPickerView: UICollectionViewDataSource {
         }
 
         let type = AttachmentType.allCases[indexPath.item]
-        cell.configure(type: type, cameraPreview: photoCapture?.previewView)
+        cell.configure(type: type)
         return cell
     }
 }
@@ -142,11 +118,6 @@ class AttachmentFormatCell: UICollectionViewCell {
     let label = UILabel()
 
     var attachmentType: AttachmentType?
-    weak var cameraPreview: CapturePreviewView?
-
-    private var hasCameraAccess: Bool {
-        return AVCaptureDevice.authorizationStatus(for: .video) == .authorized
-    }
 
     override init(frame: CGRect) {
 
@@ -159,10 +130,10 @@ class AttachmentFormatCell: UICollectionViewCell {
 
         contentView.addSubview(imageView)
         imageView.autoHCenterInSuperview()
-        imageView.autoSetDimensions(to: CGSize(width: 32, height: 32))
+        imageView.autoSetDimensions(to: CGSize(square: 32))
         imageView.contentMode = .scaleAspectFit
 
-        label.font = UIFont.ows_dynamicTypeFootnoteClamped.ows_semiBold()
+        label.font = UIFont.ows_dynamicTypeFootnoteClamped.ows_semibold
         label.textColor = Theme.attachmentKeyboardItemImageColor
         label.textAlignment = .center
         label.adjustsFontSizeToFitWidth = true
@@ -190,9 +161,8 @@ class AttachmentFormatCell: UICollectionViewCell {
         notImplemented()
     }
 
-    public func configure(type: AttachmentType, cameraPreview: CapturePreviewView?) {
+    public func configure(type: AttachmentType) {
         self.attachmentType = type
-        self.cameraPreview = cameraPreview
 
         let imageName: String
         let text: String
@@ -200,50 +170,31 @@ class AttachmentFormatCell: UICollectionViewCell {
         switch type {
         case .camera:
             text = NSLocalizedString("ATTACHMENT_KEYBOARD_CAMERA", comment: "A button to open the camera from the Attachment Keyboard")
-            imageName = "camera-outline-32"
+            imageName = Theme.iconName(.attachmentCamera)
         case .contact:
             text = NSLocalizedString("ATTACHMENT_KEYBOARD_CONTACT", comment: "A button to select a contact from the Attachment Keyboard")
-            imageName = "contact-outline-32"
+            imageName = Theme.iconName(.attachmentContact)
         case .file:
             text = NSLocalizedString("ATTACHMENT_KEYBOARD_FILE", comment: "A button to select a file from the Attachment Keyboard")
-            imageName = "file-outline-32"
+            imageName = Theme.iconName(.attachmentFile)
         case .gif:
             text = NSLocalizedString("ATTACHMENT_KEYBOARD_GIF", comment: "A button to select a GIF from the Attachment Keyboard")
-            imageName = "gif-outline-32"
+            imageName = Theme.iconName(.attachmentGif)
         case .location:
             text = NSLocalizedString("ATTACHMENT_KEYBOARD_LOCATION", comment: "A button to select a location from the Attachment Keyboard")
-            imageName = "location-outline-32"
+            imageName = Theme.iconName(.attachmentLocation)
         }
 
         // The light theme images come with a background baked in, so we don't tint them.
         if Theme.isDarkThemeEnabled {
             imageView.setTemplateImageName(imageName, tintColor: Theme.attachmentKeyboardItemImageColor)
         } else {
-            imageView.setImage(imageName: imageName + "-with-background")
+            imageView.setImage(imageName: imageName)
         }
 
         label.text = text
 
         self.accessibilityIdentifier = UIView.accessibilityIdentifier(in: self, name: "format-\(type.rawValue)")
-
-        showLiveCameraIfAvailable()
-    }
-
-    func showLiveCameraIfAvailable() {
-        guard case .camera? = attachmentType, hasCameraAccess else { return }
-
-        // If we have access to the camera, we'll want to show it eventually.
-        // Style this in prepration for that.
-
-        imageView.setTemplateImageName("camera-outline-32", tintColor: .white)
-        label.textColor = .white
-        backgroundColor = UIColor.black.withAlphaComponent(0.4)
-
-        guard let cameraPreview = cameraPreview else { return }
-
-        contentView.insertSubview(cameraPreview, belowSubview: imageView)
-        cameraPreview.autoPinEdgesToSuperviewEdges()
-        cameraPreview.contentMode = .scaleAspectFill
     }
 
     override public func prepareForReuse() {
@@ -254,9 +205,5 @@ class AttachmentFormatCell: UICollectionViewCell {
 
         label.textColor = Theme.attachmentKeyboardItemImageColor
         backgroundColor = Theme.attachmentKeyboardItemBackgroundColor
-
-        if let cameraPreview = cameraPreview, cameraPreview.superview == contentView {
-            cameraPreview.removeFromSuperview()
-        }
     }
 }

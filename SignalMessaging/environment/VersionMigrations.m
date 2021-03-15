@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "VersionMigrations.h"
@@ -11,6 +11,7 @@
 #import <SignalServiceKit/NSUserDefaults+OWS.h>
 #import <SignalServiceKit/OWSPrimaryStorage.h>
 #import <SignalServiceKit/OWSRequestFactory.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSAccountManager.h>
 #import <SignalServiceKit/TSNetworkManager.h>
 #import <YapDatabase/YapDatabase.h>
@@ -47,8 +48,8 @@ NS_ASSUME_NONNULL_BEGIN
     OWSAssertDebug(Environment.shared);
     OWSAssertDebug(completion);
 
-    NSString *_Nullable lastCompletedLaunchAppVersion = AppVersion.sharedInstance.lastCompletedLaunchAppVersion;
-    NSString *currentVersion = AppVersion.sharedInstance.currentAppVersion;
+    NSString *_Nullable lastCompletedLaunchAppVersion = AppVersion.shared.lastCompletedLaunchAppVersion;
+    NSString *currentVersion = AppVersion.shared.currentAppVersion;
 
     OWSLogInfo(@"Checking migrations. currentVersion: %@, lastCompletedLaunchAppVersion: %@",
         currentVersion,
@@ -56,31 +57,31 @@ NS_ASSUME_NONNULL_BEGIN
 
     if (!lastCompletedLaunchAppVersion) {
         OWSLogInfo(@"No previous version found. Probably first launch since install - nothing to migrate.");
-        OWSDatabaseMigrationRunner *runner = [[OWSDatabaseMigrationRunner alloc] init];
-        [runner assumeAllExistingMigrationsRun];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion();
-        });
+        if (self.databaseStorage.canReadFromGrdb) {
+            [self.databaseStorage runGrdbSchemaMigrationsWithCompletion:completion];
+        } else {
+            OWSDatabaseMigrationRunner *runner = [OWSDatabaseMigrationRunner new];
+            [runner assumeAllExistingMigrationsRun];
+            dispatch_async(dispatch_get_main_queue(), completion);
+        }
         return;
     }
 
     if ([self isVersion:lastCompletedLaunchAppVersion atLeast:@"1.0.2" andLessThan:@"2.0"]) {
         OWSLogError(@"Migrating from RedPhone no longer supported. Quitting.");
         // Not translating these as so few are affected.
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:@"You must reinstall Signal"
-                             message:
-                                 @"Sorry, your installation is too old for us to update. You'll have to start fresh."
-                      preferredStyle:UIAlertControllerStyleAlert];
+        ActionSheetController *actionSheet = [[ActionSheetController alloc]
+            initWithTitle:@"You must reinstall Signal"
+                  message:@"Sorry, your installation is too old for us to update. You'll have to start fresh."];
 
-        UIAlertAction *quitAction = [UIAlertAction actionWithTitle:@"Quit"
-                                                             style:UIAlertActionStyleDefault
-                                                           handler:^(UIAlertAction *_Nonnull action) {
-                                                               OWSFail(@"Obsolete install.");
-                                                           }];
-        [alert addAction:quitAction];
+        ActionSheetAction *quitAction = [[ActionSheetAction alloc] initWithTitle:@"Quit"
+                                                                           style:ActionSheetActionStyleDefault
+                                                                         handler:^(ActionSheetAction *_Nonnull action) {
+                                                                             OWSFail(@"Obsolete install.");
+                                                                         }];
+        [actionSheet addAction:quitAction];
 
-        [CurrentAppContext().frontmostViewController presentAlert:alert];
+        [CurrentAppContext().frontmostViewController presentActionSheet:actionSheet];
     }
 
     if ([self isVersion:lastCompletedLaunchAppVersion atLeast:@"2.0.0" andLessThan:@"2.1.70"] &&
@@ -94,7 +95,13 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [[[OWSDatabaseMigrationRunner alloc] init] runAllOutstandingWithCompletion:completion];
+        if (self.databaseStorage.canReadFromGrdb) {
+            [self.databaseStorage runGrdbSchemaMigrationsWithCompletion:completion];
+        } else {
+            [[[OWSDatabaseMigrationRunner alloc] init] runAllOutstandingWithCompletion:^{
+                completion();
+            }];
+        }
     });
 }
 

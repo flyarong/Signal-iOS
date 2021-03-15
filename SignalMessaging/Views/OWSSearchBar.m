@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSSearchBar.h"
@@ -9,7 +9,15 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@interface OWSSearchBar ()
+
+@property (nonatomic) OWSSearchBarStyle currentStyle;
+
+@end
+
 @implementation OWSSearchBar
+
+@synthesize searchFieldBackgroundColorOverride = _searchFieldBackgroundColorOverride;
 
 - (instancetype)init
 {
@@ -40,6 +48,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)ows_configure
 {
+    _currentStyle = OWSSearchBarStyle_Default;
+
     [self ows_applyTheme];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -55,17 +65,22 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)ows_applyTheme
 {
-    [self.class applyThemeToSearchBar:self];
+    [self.class applyThemeToSearchBar:self style:self.currentStyle];
 }
 
 + (void)applyThemeToSearchBar:(UISearchBar *)searchBar
 {
+    [self applyThemeToSearchBar:searchBar style:OWSSearchBarStyle_Default];
+}
+
++ (void)applyThemeToSearchBar:(UISearchBar *)searchBar style:(OWSSearchBarStyle)style
+{
     OWSAssertIsOnMainThread();
 
-    UIColor *foregroundColor = Theme.placeholderColor;
-    searchBar.barTintColor = Theme.backgroundColor;
-    searchBar.tintColor = Theme.primaryColor;
+    UIColor *foregroundColor = Theme.secondaryTextAndIconColor;
+    searchBar.tintColor = Theme.secondaryTextAndIconColor;
     searchBar.barStyle = Theme.barStyle;
+    searchBar.barTintColor = Theme.backgroundColor;
 
     // Hide searchBar border.
     // Alternatively we could hide the border by using `UISearchBarStyleMinimal`, but that causes an issue when toggling
@@ -89,14 +104,28 @@ NS_ASSUME_NONNULL_BEGIN
         [searchBar setImage:nil forSearchBarIcon:UISearchBarIconSearch state:UIControlStateNormal];
     }
 
-    [searchBar traverseViewHierarchyWithVisitor:^(UIView *view) {
+    UIColor *searchFieldBackgroundColor = Theme.searchFieldBackgroundColor;
+    if (style == OWSSearchBarStyle_SecondaryBar) {
+        searchFieldBackgroundColor = Theme.isDarkThemeEnabled ? UIColor.ows_gray95Color : UIColor.ows_gray05Color;
+    } else if ([searchBar isKindOfClass:[OWSSearchBar class]]
+        && ((OWSSearchBar *)searchBar).searchFieldBackgroundColorOverride) {
+        searchFieldBackgroundColor = ((OWSSearchBar *)searchBar).searchFieldBackgroundColorOverride;
+    }
+
+    [searchBar traverseViewHierarchyDownwardWithVisitor:^(UIView *view) {
         if ([view isKindOfClass:[UITextField class]]) {
             UITextField *textField = (UITextField *)view;
-            textField.backgroundColor = Theme.searchFieldBackgroundColor;
-            textField.textColor = Theme.primaryColor;
+            textField.backgroundColor = searchFieldBackgroundColor;
+            textField.textColor = Theme.primaryTextColor;
             textField.keyboardAppearance = Theme.keyboardAppearance;
         }
     }];
+}
+
+- (void)switchToStyle:(OWSSearchBarStyle)style
+{
+    self.currentStyle = style;
+    [self ows_applyTheme];
 }
 
 - (void)themeDidChange:(NSNotification *)notification
@@ -104,6 +133,21 @@ NS_ASSUME_NONNULL_BEGIN
     OWSAssertIsOnMainThread();
 
     [self ows_applyTheme];
+}
+
+- (void)setSearchFieldBackgroundColorOverride:(nullable UIColor *)searchFieldBackgroundColorOverride
+{
+    OWSAssertIsOnMainThread();
+
+    _searchFieldBackgroundColorOverride = searchFieldBackgroundColorOverride;
+
+    [self ows_applyTheme];
+}
+
+- (nullable UIColor *)searchFieldBackgroundColorOverride
+{
+    OWSAssertIsOnMainThread();
+    return _searchFieldBackgroundColorOverride;
 }
 
 @end

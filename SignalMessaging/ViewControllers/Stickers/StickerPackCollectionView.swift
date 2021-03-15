@@ -1,9 +1,8 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
-import YYImage
 
 @objc
 public protocol StickerPackCollectionViewDelegate {
@@ -54,9 +53,12 @@ public class StickerPackCollectionView: UICollectionView {
     }
 
     private let cellReuseIdentifier = "cellReuseIdentifier"
+    private let placeholderColor: UIColor
 
     @objc
-    public required init() {
+    public required init(placeholderColor: UIColor = .ows_gray45) {
+        self.placeholderColor = placeholderColor
+
         super.init(frame: .zero, collectionViewLayout: StickerPackCollectionView.buildLayout())
 
         delegate = self
@@ -99,7 +101,7 @@ public class StickerPackCollectionView: UICollectionView {
         }
     }
 
-    func show(dataSource: StickerPackDataSource) {
+    public func show(dataSource: StickerPackDataSource) {
         AssertIsOnMainThread()
 
         self.stickerPackDataSource = dataSource
@@ -114,29 +116,31 @@ public class StickerPackCollectionView: UICollectionView {
     private func reloadStickers() {
         AssertIsOnMainThread()
 
+        defer { reloadData() }
+
         guard let stickerPackDataSource = stickerPackDataSource else {
             stickerInfos = []
             return
         }
 
-        stickerInfos = stickerPackDataSource.installedStickerInfos
+        let installedStickerInfos = stickerPackDataSource.installedStickerInfos
 
-        reloadData()
+        if stickerPackDataSource is TransientStickerPackDataSource {
+            guard let allStickerInfos = stickerPackDataSource.getStickerPack()?.stickerInfos else {
+                stickerInfos = []
+                owsAssertDebug(installedStickerInfos.isEmpty)
+                return
+            }
+
+            stickerInfos = allStickerInfos
+            owsAssertDebug(stickerInfos.count >= installedStickerInfos.count)
+        } else {
+            stickerInfos = installedStickerInfos
+        }
     }
 
     @objc
     func handleLongPress(sender: UIGestureRecognizer) {
-
-        guard let indexPath = self.indexPathForItem(at: sender.location(in: self)) else {
-            hidePreview()
-            return
-        }
-        guard let stickerInfo = stickerInfos[safe: indexPath.row] else {
-            owsFailDebug("Invalid index path: \(indexPath)")
-            hidePreview()
-            return
-        }
-
         switch sender.state {
         case .began, .changed:
             break
@@ -144,6 +148,15 @@ public class StickerPackCollectionView: UICollectionView {
             fallthrough
         @unknown default:
             hidePreview()
+            return
+        }
+
+        // Do nothing if we're not currently pressing on a pack, we'll hide it when we release
+        // or update it when the user moves their touch over another pack. This prevents "flashing"
+        // as the user moves their finger between packs.
+        guard let indexPath = self.indexPathForItem(at: sender.location(in: self)) else { return }
+        guard let stickerInfo = stickerInfos[safe: indexPath.row] else {
+            owsFailDebug("Invalid index path: \(indexPath)")
             return
         }
 
@@ -174,7 +187,7 @@ public class StickerPackCollectionView: UICollectionView {
         hidePreview()
 
         guard let stickerView = imageView(forStickerInfo: stickerInfo) else {
-            owsFailDebug("Couldn't load sticker for display")
+            Logger.warn("Couldn't load sticker for display")
             return
         }
         guard let stickerDelegate = stickerDelegate else {
@@ -207,7 +220,7 @@ public class StickerPackCollectionView: UICollectionView {
         stickerView.autoCenterInSuperview()
         let vMargin: CGFloat = 40
         let hMargin: CGFloat = 60
-        stickerView.autoSetDimension(.width, toSize: hostView.height() - vMargin * 2, relation: .lessThanOrEqual)
+        stickerView.autoSetDimension(.width, toSize: hostView.height - vMargin * 2, relation: .lessThanOrEqual)
         stickerView.autoPinEdge(toSuperviewEdge: .top, withInset: vMargin, relation: .greaterThanOrEqual)
         stickerView.autoPinEdge(toSuperviewEdge: .bottom, withInset: vMargin, relation: .greaterThanOrEqual)
         stickerView.autoPinEdge(toSuperviewEdge: .leading, withInset: hMargin, relation: .greaterThanOrEqual)
@@ -215,27 +228,32 @@ public class StickerPackCollectionView: UICollectionView {
     }
 
     private func imageView(forStickerInfo stickerInfo: StickerInfo) -> UIView? {
-
         guard let stickerPackDataSource = stickerPackDataSource else {
             owsFailDebug("Missing stickerPackDataSource.")
             return nil
         }
-        guard let filePath = stickerPackDataSource.filePath(forSticker: stickerInfo) else {
-            owsFailDebug("Missing sticker data file path.")
-            return nil
-        }
-        guard NSData.ows_isValidImage(atPath: filePath, mimeType: OWSMimeTypeImageWebp) else {
-            owsFailDebug("Invalid sticker.")
-            return nil
-        }
-        guard let stickerImage = YYImage(contentsOfFile: filePath) else {
-            owsFailDebug("Sticker could not be parsed.")
-            return nil
+        return StickerView.stickerView(forStickerInfo: stickerInfo, dataSource: stickerPackDataSource)
+    }
+
+    private let reusableStickerViewCache = NSCache<StickerInfo, StickerReusableView>()
+    private func reusableStickerView(forStickerInfo stickerInfo: StickerInfo) -> StickerReusableView {
+        let view: StickerReusableView = {
+            if let view = reusableStickerViewCache.object(forKey: stickerInfo) { return view }
+            let view = StickerReusableView()
+            reusableStickerViewCache.setObject(view, forKey: stickerInfo)
+            return view
+        }()
+
+        guard !view.hasStickerView else { return view }
+
+        guard let imageView = imageView(forStickerInfo: stickerInfo) else {
+            view.showPlaceholder(color: placeholderColor)
+            return view
         }
 
-        let stickerView = YYAnimatedImageView()
-        stickerView.image = stickerImage
-        return stickerView
+        view.configure(with: imageView)
+
+        return view
     }
 }
 
@@ -267,29 +285,17 @@ extension StickerPackCollectionView: UICollectionViewDataSource {
     }
 
     public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        // We could eventually use cells that lazy-load the sticker views
-        // when the cells becomes visible and eagerly unload them.
-        // But we probably won't need to do that.
         let cell = dequeueReusableCell(withReuseIdentifier: cellReuseIdentifier, for: indexPath)
-        for subview in cell.contentView.subviews {
-            subview.removeFromSuperview()
-        }
+        cell.contentView.removeAllSubviews()
 
         guard let stickerInfo = stickerInfos[safe: indexPath.row] else {
             owsFailDebug("Invalid index path: \(indexPath)")
             return cell
         }
-        guard let stickerView = imageView(forStickerInfo: stickerInfo) else {
-            owsFailDebug("Couldn't load sticker for display")
-            return cell
-        }
 
-        cell.contentView.addSubview(stickerView)
-        stickerView.autoPinEdgesToSuperviewEdges()
-
-        let accessibilityName = "sticker." + stickerInfo.asKey()
-        cell.accessibilityIdentifier = UIView.accessibilityIdentifier(in: self, name: accessibilityName + ".cell")
-        stickerView.accessibilityIdentifier = UIView.accessibilityIdentifier(in: self, name: accessibilityName + ".item")
+        let cellView = reusableStickerView(forStickerInfo: stickerInfo)
+        cell.contentView.addSubview(cellView)
+        cellView.autoPinEdgesToSuperviewEdges()
 
         return cell
     }
@@ -305,9 +311,7 @@ extension StickerPackCollectionView {
     private class func buildLayout() -> UICollectionViewFlowLayout {
         let layout = UICollectionViewFlowLayout()
 
-        if #available(iOS 11, *) {
-            layout.sectionInsetReference = .fromSafeArea
-        }
+        layout.sectionInsetReference = .fromSafeArea
         layout.minimumInteritemSpacing = kSpacing
         layout.minimumLineSpacing = kSpacing
         let inset = kSpacing
@@ -323,12 +327,7 @@ extension StickerPackCollectionView {
             return
         }
 
-        let containerWidth: CGFloat
-        if #available(iOS 11.0, *) {
-            containerWidth = self.safeAreaLayoutGuide.layoutFrame.size.width
-        } else {
-            containerWidth = self.frame.size.width
-        }
+        let containerWidth = self.safeAreaLayoutGuide.layoutFrame.size.width
 
         let spacing = StickerPackCollectionView.kSpacing
         let inset = spacing
@@ -336,9 +335,9 @@ extension StickerPackCollectionView {
         let contentWidth = containerWidth - 2 * inset
         let columnCount = UInt((contentWidth + spacing) / (preferredCellSize + spacing))
         let cellWidth = (contentWidth - spacing * (CGFloat(columnCount) - 1)) / CGFloat(columnCount)
-        let itemSize = CGSize(width: cellWidth, height: cellWidth)
+        let itemSize = CGSize(square: cellWidth)
 
-        if (itemSize != flowLayout.itemSize) {
+        if itemSize != flowLayout.itemSize {
             flowLayout.itemSize = itemSize
             flowLayout.invalidateLayout()
         }

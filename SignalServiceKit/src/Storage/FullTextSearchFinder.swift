@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -9,8 +9,8 @@ import GRDB
 public class FullTextSearchFinder: NSObject {
     public func enumerateObjects(searchText: String, transaction: SDSAnyReadTransaction, block: @escaping (Any, String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let yapRead):
-            YDBFullTextSearchFinder().enumerateObjects(searchText: searchText, transaction: yapRead, block: block)
+        case .yapRead:
+            owsFailDebug("YDB FTS no longer supported.")
         case .grdbRead(let grdbRead):
             GRDBFullTextSearchFinder.enumerateObjects(searchText: searchText, transaction: grdbRead, block: block)
         }
@@ -26,6 +26,15 @@ public class FullTextSearchFinder: NSObject {
         case .grdbWrite(let grdbWrite):
             GRDBFullTextSearchFinder.modelWasInserted(model: model, transaction: grdbWrite)
         }
+    }
+
+    @objc
+    public func modelWasUpdatedObjc(model: TSYapDatabaseObject, transaction: SDSAnyWriteTransaction) {
+        guard let model = model as? SDSModel else {
+            owsFailDebug("Invalid model.")
+            return
+        }
+        modelWasUpdated(model: model, transaction: transaction)
     }
 
     public func modelWasUpdated(model: SDSModel, transaction: SDSAnyWriteTransaction) {
@@ -190,109 +199,16 @@ extension FullTextSearchFinder {
 
 // MARK: -
 
-@objc
-public class YDBFullTextSearchFinder: NSObject {
-
-    public func enumerateObjects(searchText: String, transaction: YapDatabaseReadTransaction, block: @escaping (Any, String, UnsafeMutablePointer<ObjCBool>) -> Void) {
-        guard let ext: YapDatabaseFullTextSearchTransaction = ext(transaction: transaction) else {
-            owsFailDebug("ext was unexpectedly nil")
-            return
-        }
-
-        let query = FullTextSearchFinder.query(searchText: searchText)
-
-        guard query.count > 0 else {
-            owsFailDebug("Empty query.")
-            return
-        }
-
-        Logger.verbose("query: \(query)")
-
-        let maxSearchResults = 500
-        var searchResultCount = 0
-        let snippetOptions = YapDatabaseFullTextSearchSnippetOptions()
-        snippetOptions.startMatchText = ""
-        snippetOptions.endMatchText = ""
-        ext.enumerateKeysAndObjects(matching: query, with: snippetOptions) { (snippet: String, _: String, _: String, object: Any, stop: UnsafeMutablePointer<ObjCBool>) in
-            guard searchResultCount < maxSearchResults else {
-                stop.pointee = true
-                return
-            }
-            searchResultCount += 1
-
-            block(object, snippet, stop)
-        }
-    }
-
-    // MARK: - Extension Registration
-
-    private static let dbExtensionName: String = "FullTextSearchFinderExtension"
-
-    private func ext(transaction: YapDatabaseReadTransaction) -> YapDatabaseFullTextSearchTransaction? {
-        return transaction.safeFullTextSearchTransaction(YDBFullTextSearchFinder.dbExtensionName)
-    }
-
-    @objc
-    public class func asyncRegisterDatabaseExtension(storage: OWSStorage) {
-        storage.asyncRegister(dbExtensionConfig, withName: dbExtensionName)
-    }
-
-    // Only for testing.
-    public class func ensureDatabaseExtensionRegistered(storage: OWSStorage) {
-        guard storage.registeredExtension(dbExtensionName) == nil else {
-            return
-        }
-
-        storage.register(dbExtensionConfig, withName: dbExtensionName)
-    }
-
-    private class var dbExtensionConfig: YapDatabaseFullTextSearch {
-        AssertIsOnMainThread()
-
-        let contentColumnName = "content"
-
-        let handler = YapDatabaseFullTextSearchHandler.withObjectBlock { (transaction: YapDatabaseReadTransaction, dict: NSMutableDictionary, _: String, _: String, object: Any) in
-            dict[contentColumnName] = AnySearchIndexer.indexContent(object: object, transaction: transaction.asAnyRead)
-        }
-
-        // update search index on contact name changes?
-
-        return YapDatabaseFullTextSearch(columnNames: ["content"],
-                                         options: nil,
-                                         handler: handler,
-                                         ftsVersion: YapDatabaseFullTextSearchFTS5Version,
-                                         versionTag: "1")
-    }
-}
-
-// MARK: -
-
 // See: http://groue.github.io/GRDB.swift/docs/4.1/index.html#full-text-search
 // See: https://www.sqlite.org/fts5.html
 @objc
 class GRDBFullTextSearchFinder: NSObject {
 
-    static let databaseTableName: String = "signal_grdb_fts"
+    static let contentTableName: String = "indexable_text"
+    static let ftsTableName: String = "indexable_text_fts"
     static let uniqueIdColumn: String = "uniqueId"
     static let collectionColumn: String = "collection"
     static let ftsContentColumn: String = "ftsIndexableContent"
-
-    class func createTables(database: Database) throws {
-        try database.create(virtualTable: databaseTableName, using: FTS5()) { table in
-            // We could use FTS5TokenizerDescriptor.porter(wrapping: FTS5TokenizerDescriptor.unicode61())
-            //
-            // Porter does stemming (e.g. "hunting" will match "hunter").
-            // unicode61 will remove diacritics (e.g. "senor" will match "señor").
-            //
-            // GRDB TODO: Should we do stemming?
-            let tokenizer = FTS5TokenizerDescriptor.unicode61()
-            table.tokenizer = tokenizer
-
-            table.column("\(collectionColumn)").notIndexed()
-            table.column("\(uniqueIdColumn)").notIndexed()
-            table.column("\(ftsContentColumn)")
-        }
-    }
 
     private class func collection(forModel model: SDSModel) -> String {
         // Note that allModelsWereRemoved(collection: ) makes the same
@@ -301,14 +217,27 @@ class GRDBFullTextSearchFinder: NSObject {
         return type(of: model).collection()
     }
 
+    private static let serialQueue = DispatchQueue(label: "org.signal.fts")
+    // This should only be accessed on serialQueue.
+    private static let ftsCache: NSCache<NSString, NSString> = NSCache()
+
+    private class func cacheKey(collection: String, uniqueId: String) -> String {
+        return "\(collection).\(uniqueId)"
+    }
+
     public class func modelWasInserted(model: SDSModel, transaction: GRDBWriteTransaction) {
         let uniqueId = model.uniqueId
         let collection = self.collection(forModel: model)
         let ftsContent = AnySearchIndexer.indexContent(object: model, transaction: transaction.asAnyRead) ?? ""
 
+        serialQueue.sync {
+            let cacheKey = self.cacheKey(collection: collection, uniqueId: uniqueId)
+            ftsCache.setObject(ftsContent as NSString, forKey: cacheKey as NSString)
+        }
+
         executeUpdate(
             sql: """
-            INSERT INTO \(databaseTableName)
+            INSERT INTO \(contentTableName)
             (\(collectionColumn), \(uniqueIdColumn), \(ftsContentColumn))
             VALUES
             (?, ?, ?)
@@ -322,9 +251,26 @@ class GRDBFullTextSearchFinder: NSObject {
         let collection = self.collection(forModel: model)
         let ftsContent = AnySearchIndexer.indexContent(object: model, transaction: transaction.asAnyRead) ?? ""
 
+        let shouldSkipUpdate: Bool = serialQueue.sync {
+            guard !CurrentAppContext().isRunningTests else {
+                return false
+            }
+            let cacheKey = self.cacheKey(collection: collection, uniqueId: uniqueId)
+            if let cachedValue = ftsCache.object(forKey: cacheKey as NSString),
+                (cachedValue as String) == ftsContent {
+                return true
+            }
+            ftsCache.setObject(ftsContent as NSString, forKey: cacheKey as NSString)
+            return false
+        }
+        guard !shouldSkipUpdate else {
+            Logger.verbose("Skipping FTS update")
+            return
+        }
+
         executeUpdate(
             sql: """
-            UPDATE \(databaseTableName)
+            UPDATE \(contentTableName)
             SET \(ftsContentColumn) = ?
             WHERE \(collectionColumn) == ?
             AND \(uniqueIdColumn) == ?
@@ -337,9 +283,14 @@ class GRDBFullTextSearchFinder: NSObject {
         let uniqueId = model.uniqueId
         let collection = self.collection(forModel: model)
 
+        serialQueue.sync {
+            let cacheKey = self.cacheKey(collection: collection, uniqueId: uniqueId)
+            ftsCache.removeObject(forKey: cacheKey as NSString)
+        }
+
         executeUpdate(
             sql: """
-            DELETE FROM \(databaseTableName)
+            DELETE FROM \(contentTableName)
             WHERE \(uniqueIdColumn) == ?
             AND \(collectionColumn) == ?
             """,
@@ -348,9 +299,14 @@ class GRDBFullTextSearchFinder: NSObject {
     }
 
     public class func allModelsWereRemoved(collection: String, transaction: GRDBWriteTransaction) {
+
+        serialQueue.sync {
+            ftsCache.removeAllObjects()
+        }
+
         executeUpdate(
             sql: """
-            DELETE FROM \(databaseTableName)
+            DELETE FROM \(contentTableName)
             WHERE \(collectionColumn) == ?
             """,
             arguments: [collection],
@@ -395,6 +351,13 @@ class GRDBFullTextSearchFinder: NSObject {
                                                         return nil
             }
             return model
+        case SignalRecipient.collection():
+            guard let model = SignalRecipient.anyFetch(uniqueId: uniqueId,
+                                                     transaction: transaction.asAnyRead) else {
+                                                        owsFailDebug("Couldn't load record: \(collection)")
+                                                        return nil
+            }
+            return model
         default:
             owsFailDebug("Unexpected record type: \(collection)")
             return nil
@@ -408,7 +371,9 @@ class GRDBFullTextSearchFinder: NSObject {
         let query = FullTextSearchFinder.query(searchText: searchText)
 
         guard query.count > 0 else {
-            owsFailDebug("Empty query.")
+            // FullTextSearchFinder.query filters some characters, so query
+            // may now be empty.
+            Logger.warn("Empty query.")
             return
         }
 
@@ -417,17 +382,18 @@ class GRDBFullTextSearchFinder: NSObject {
             var stop: ObjCBool = false
 
             // GRDB TODO: We could use bm25() instead of rank to order results.
-            let columnIndex = 2
+            let indexOfContentColumnInFTSTable = 0
             // Determines the length of the snippet.
             let numTokens: UInt = 15
             let matchSnippet = "match_snippet"
             let sql: String = """
                 SELECT
-                \(collectionColumn), \(uniqueIdColumn), \(ftsContentColumn),
-                snippet(\(databaseTableName), \(columnIndex), '', '', '…', \(numTokens) ) as \(matchSnippet)
-                FROM \(databaseTableName)
-                WHERE \(databaseTableName)
-                MATCH '"\(ftsContentColumn)" : \(query)'
+                    \(contentTableName).\(collectionColumn),
+                    \(contentTableName).\(uniqueIdColumn),
+                    snippet(\(ftsTableName), \(indexOfContentColumnInFTSTable), '', '', '…', \(numTokens) ) as \(matchSnippet)
+                FROM \(ftsTableName)
+                LEFT JOIN \(contentTableName) ON \(contentTableName).rowId = \(ftsTableName).rowId
+                WHERE \(ftsTableName) MATCH '"\(ftsContentColumn)" : \(query)'
                 ORDER BY rank
             """
             let cursor = try Row.fetchCursor(transaction.database, sql: sql)
@@ -486,7 +452,7 @@ class AnySearchIndexer {
     // MARK: - Dependencies
 
     private static var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
+        return TSAccountManager.shared()
     }
 
     private class var contactsManager: ContactsManagerProtocol {
@@ -523,6 +489,10 @@ class AnySearchIndexer {
         let nationalNumber: String? = { (recipientId: String?) -> String? in
             guard let recipientId = recipientId else { return nil }
 
+            guard recipientId != kLocalProfileInvariantPhoneNumber else {
+                return ""
+            }
+
             guard let phoneNumber = PhoneNumber(fromE164: recipientId) else {
                 owsFailDebug("unexpected unparseable recipientId: \(recipientId)")
                 return ""
@@ -540,7 +510,7 @@ class AnySearchIndexer {
     }
 
     private static let messageIndexer: SearchIndexer<TSMessage> = SearchIndexer { (message: TSMessage, transaction: SDSAnyReadTransaction) in
-        if let bodyText = message.bodyText(with: transaction) {
+        if let bodyText = message.rawBody(with: transaction.unwrapGrdbRead) {
             return bodyText
         }
         return ""
@@ -565,6 +535,8 @@ class AnySearchIndexer {
             return self.messageIndexer.index(message, transaction: transaction)
         } else if let signalAccount = object as? SignalAccount {
             return self.recipientIndexer.index(signalAccount.recipientAddress, transaction: transaction)
+        } else if let signalRecipient = object as? SignalRecipient {
+            return self.recipientIndexer.index(signalRecipient.address, transaction: transaction)
         } else {
             return nil
         }

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -70,12 +70,7 @@ class ImageEditorCropViewController: OWSViewController {
         self.previewImage = previewImage
         transform = model.currentTransform()
 
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    @available(*, unavailable, message: "use other init() instead.")
-    required public init?(coder aDecoder: NSCoder) {
-        notImplemented()
+        super.init()
     }
 
     // MARK: - View Lifecycle
@@ -122,6 +117,7 @@ class ImageEditorCropViewController: OWSViewController {
             strongSelf.updateCropViewLayout()
         }
         wrapperView.addSubview(clipView)
+        clipView.setContentHuggingLow()
 
         croppedImageLayer.contents = previewImage.cgImage
         croppedImageLayer.contentsScale = previewImage.scale
@@ -149,6 +145,7 @@ class ImageEditorCropViewController: OWSViewController {
         uncroppedContentView.layer.addSublayer(uncroppedImageLayer)
         wrapperView.addSubview(uncroppedContentView)
         uncroppedContentView.autoPin(toEdgesOf: croppedContentView)
+        wrapperView.setContentHuggingLow()
 
         // MARK: - Footer
 
@@ -158,10 +155,16 @@ class ImageEditorCropViewController: OWSViewController {
             UIView.hStretchingSpacer(),
             cropLockButton
             ])
+        for button in footer.subviews {
+            button.setContentHuggingVerticalHigh()
+            button.setCompressionResistanceVerticalHigh()
+        }
         footer.axis = .horizontal
         footer.spacing = 16
         footer.backgroundColor = .clear
         footer.isOpaque = false
+        footer.setContentHuggingVerticalHigh()
+        footer.setCompressionResistanceVerticalHigh()
 
         let imageMargin: CGFloat = 20
         let stackView = UIStackView(arrangedSubviews: [
@@ -239,15 +242,10 @@ class ImageEditorCropViewController: OWSViewController {
 
     @objc
     public override var prefersStatusBarHidden: Bool {
-        guard !OWSWindowManager.shared().hasCall() else {
+        guard !OWSWindowManager.shared.hasCall else {
             return false
         }
 
-        return true
-    }
-
-    @objc
-    override public var canBecomeFirstResponder: Bool {
         return true
     }
 
@@ -272,8 +270,8 @@ class ImageEditorCropViewController: OWSViewController {
     private func setCropViewAppearance() {
 
         // TODO: Tune the size.
-        let cornerSize = CGSize(width: min(clipView.width() * 0.5, ImageEditorCropViewController.desiredCornerSize),
-                                height: min(clipView.height() * 0.5, ImageEditorCropViewController.desiredCornerSize))
+        let cornerSize = CGSize(width: min(clipView.width * 0.5, ImageEditorCropViewController.desiredCornerSize),
+                                height: min(clipView.height * 0.5, ImageEditorCropViewController.desiredCornerSize))
         self.cornerSize = cornerSize
         for cropCornerView in cropCornerViews {
             let cornerThickness: CGFloat = 2
@@ -340,8 +338,8 @@ class ImageEditorCropViewController: OWSViewController {
         cropViewConstraints.removeAll()
 
         // TODO: Tune the size.
-        let cornerSize = CGSize(width: min(clipView.width() * 0.5, ImageEditorCropViewController.desiredCornerSize),
-                                height: min(clipView.height() * 0.5, ImageEditorCropViewController.desiredCornerSize))
+        let cornerSize = CGSize(width: min(clipView.width * 0.5, ImageEditorCropViewController.desiredCornerSize),
+                                height: min(clipView.height * 0.5, ImageEditorCropViewController.desiredCornerSize))
         self.cornerSize = cornerSize
         for cropCornerView in cropCornerViews {
             cropViewConstraints.append(contentsOf: cropCornerView.autoSetDimensions(to: cornerSize))
@@ -584,7 +582,7 @@ class ImageEditorCropViewController: OWSViewController {
 
         // If crop is locked, update the crop rectangle
         // to retain the original aspect ratio.
-        if (isCropLocked) {
+        if isCropLocked {
             let scaleX = cropRectangleNow.width / cropRectangleStart.width
             let scaleY = cropRectangleNow.height / cropRectangleStart.height
             var cropRectangleLocked = cropRectangleStart
@@ -635,8 +633,8 @@ class ImageEditorCropViewController: OWSViewController {
 
         // TODO: The output size should be rounded, although this can
         //       cause crop to be slightly not WYSIWYG.
-        let croppedOutputSizePixels = CGSizeRound(CGSize(width: transform.outputSizePixels.width * cropRect.width / clipView.width(),
-                                                         height: transform.outputSizePixels.height * cropRect.height / clipView.height()))
+        let croppedOutputSizePixels = CGSizeRound(CGSize(width: transform.outputSizePixels.width * cropRect.width / clipView.width,
+                                                         height: transform.outputSizePixels.height * cropRect.height / clipView.height))
 
         // We need to update the transform's unitTranslation and scaling properties
         // to reflect the crop.
@@ -727,8 +725,8 @@ class ImageEditorCropViewController: OWSViewController {
         let tolerance: CGFloat = ImageEditorCropViewController.desiredCornerSize * 2.0
         let left = tolerance
         let top = tolerance
-        let right = clipView.width() - tolerance
-        let bottom = clipView.height() - tolerance
+        let right = clipView.width - tolerance
+        let bottom = clipView.height - tolerance
 
         // We could ignore touches far outside the crop rectangle.
         if location.x < left {

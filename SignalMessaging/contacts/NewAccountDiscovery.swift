@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -32,7 +32,7 @@ public class NewAccountDiscovery: NSObject {
     }
 
     public func discovered(newRecipients: Set<SignalRecipient>, forNewThreadsOnly: Bool) {
-        let shouldNotifyOfNewAccounts = databaseStorage.readReturningResult { transaction in
+        let shouldNotifyOfNewAccounts = databaseStorage.read { transaction in
             self.preferences.shouldNotifyOfNewAccounts(transaction: transaction)
         }
 
@@ -42,8 +42,7 @@ public class NewAccountDiscovery: NSObject {
         }
 
         databaseStorage.asyncWrite { transaction in
-            // Don't spam inbox with a ton of these
-            for recipient in newRecipients.prefix(3) {
+            for recipient in newRecipients {
 
                 guard !recipient.address.isLocalAddress else {
                     owsFailDebug("unexpectedly found localNumber")
@@ -54,14 +53,13 @@ public class NewAccountDiscovery: NSObject {
                 // but for testing we disabled the `forNewThreadsOnly` flag.
                 if forNewThreadsOnly {
                     guard TSContactThread.getWithContactAddress(recipient.address, transaction: transaction) == nil else {
-                        owsFailDebug("not creating notification for 'new' user in existing thread.")
+                        Logger.info("not creating notification for reregistered user with existing thread.")
                         continue
                     }
                 }
 
                 let thread = TSContactThread.getOrCreateThread(withContactAddress: recipient.address, transaction: transaction)
-                let message = TSInfoMessage(timestamp: NSDate.ows_millisecondTimeStamp(),
-                                            in: thread,
+                let message = TSInfoMessage(thread: thread,
                                             messageType: .userJoinedSignal)
                 message.anyInsert(transaction: transaction)
 

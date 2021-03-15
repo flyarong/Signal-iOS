@@ -1,9 +1,8 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "ScreenLockViewController.h"
-#import "UIColor+OWS.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
 #import <SignalMessaging/SignalMessaging-Swift.h>
@@ -37,7 +36,7 @@ NSString *NSStringForScreenLockUIState(ScreenLockUIState value)
 {
     [super loadView];
 
-    self.view.backgroundColor = UIColor.ows_materialBlueColor;
+    self.view.backgroundColor = Theme.launchScreenBackgroundColor;
 
     UIView *edgesView = [UIView containerView];
     [self.view addSubview:edgesView];
@@ -45,24 +44,19 @@ NSString *NSStringForScreenLockUIState(ScreenLockUIState value)
     [edgesView autoPinEdgeToSuperviewEdge:ALEdgeBottom];
     [edgesView autoPinWidthToSuperview];
 
-    UIImage *image = [UIImage imageNamed:@"logoSignal"];
+    UIImage *image = [UIImage imageNamed:@"signal-logo-128-launch-screen"];
     UIImageView *imageView = [UIImageView new];
     imageView.image = image;
     [edgesView addSubview:imageView];
     [imageView autoHCenterInSuperview];
-
-    const CGSize screenSize = UIScreen.mainScreen.bounds.size;
-    const CGFloat shortScreenDimension = MIN(screenSize.width, screenSize.height);
-    const CGFloat imageSize = (CGFloat)round(shortScreenDimension / 3.f);
-    [imageView autoSetDimension:ALDimensionWidth toSize:imageSize];
-    [imageView autoSetDimension:ALDimensionHeight toSize:imageSize];
+    [imageView autoSetDimensionsToSize:CGSizeMake(128, 128)];
 
     const CGFloat kButtonHeight = 40.f;
     OWSFlatButton *button =
         [OWSFlatButton buttonWithTitle:NSLocalizedString(@"SCREEN_LOCK_UNLOCK_SIGNAL",
                                            @"Label for button on lock screen that lets users unlock Signal.")
                                   font:[OWSFlatButton fontForHeight:kButtonHeight]
-                            titleColor:[UIColor ows_materialBlueColor]
+                            titleColor:Theme.accentBlueColor
                        backgroundColor:[UIColor whiteColor]
                                 target:self
                               selector:@selector(showUnlockUI)];
@@ -78,6 +72,16 @@ NSString *NSStringForScreenLockUIState(ScreenLockUIState value)
     self.screenBlockingButton = button;
 
     [self updateUIWithState:ScreenLockUIStateScreenProtection isLogoAtTop:NO animated:NO];
+
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(themeDidChange)
+                                               name:ThemeDidChangeNotification
+                                             object:nil];
+}
+
+- (void)themeDidChange
+{
+    self.view.backgroundColor = Theme.launchScreenBackgroundColor;
 }
 
 // The "screen blocking" window has three possible states:
@@ -142,16 +146,24 @@ NSString *NSStringForScreenLockUIState(ScreenLockUIState value)
     [self.delegate unlockButtonWasTapped];
 }
 
-- (BOOL)canBecomeFirstResponder
+- (void)presentViewController:(UIViewController *)viewControllerToPresent
+                     animated:(BOOL)flag
+                   completion:(void (^)(void))completion
 {
-    return YES;
+    // The "Select Photos" dialog presents on top of the key window. If screen security is enabled,
+    // this will end up being the screen lock window which we immediately hide. To work around, we
+    // pass the view off to the proper frontmost view controller so it's visible to the user.
+    OWSAssertDebug([viewControllerToPresent isKindOfClass:[UIImagePickerController class]]);
+    [CurrentAppContext().frontmostViewController presentViewController:viewControllerToPresent
+                                                              animated:flag
+                                                            completion:completion];
 }
 
 #pragma mark - Orientation
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations
 {
-    return UIInterfaceOrientationMaskAllButUpsideDown;
+    return UIDevice.currentDevice.defaultSupportedOrienations;
 }
 
 @end

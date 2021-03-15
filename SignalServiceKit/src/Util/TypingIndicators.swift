@@ -1,13 +1,17 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
+import PromiseKit
 
 @objc(OWSTypingIndicators)
 public protocol TypingIndicators: class {
     @objc
     var keyValueStore: SDSKeyValueStore { get }
+
+    @objc
+    func warmCaches()
 
     @objc
     func didStartTypingOutgoingInput(inThread thread: TSThread)
@@ -37,7 +41,10 @@ public protocol TypingIndicators: class {
     func typingAddress(forThread thread: TSThread) -> SignalServiceAddress?
 
     @objc
-    func setTypingIndicatorsEnabled(value: Bool)
+    func setTypingIndicatorsEnabledAndSendSyncMessage(value: Bool)
+
+    @objc
+    func setTypingIndicatorsEnabled(value: Bool, transaction: SDSAnyWriteTransaction)
 
     @objc
     func areTypingIndicatorsEnabled() -> Bool
@@ -61,48 +68,36 @@ public class TypingIndicatorsImpl: NSObject, TypingIndicators {
 
     private let kDatabaseKey_TypingIndicatorsEnabled = "kDatabaseKey_TypingIndicatorsEnabled"
 
-    private var _areTypingIndicatorsEnabled = false
+    private let _areTypingIndicatorsEnabled = AtomicBool(false)
 
     @objc
     public let keyValueStore = SDSKeyValueStore(collection: "TypingIndicators")
 
-    public override init() {
-        super.init()
-
-        AppReadiness.runNowOrWhenAppWillBecomeReady {
-            self.setup()
+    @objc
+    public func warmCaches() {
+        let enabled = databaseStorage.read { transaction in
+            self.keyValueStore.getBool(
+                self.kDatabaseKey_TypingIndicatorsEnabled,
+                defaultValue: true,
+                transaction: transaction
+            )
         }
-    }
 
-    private func setup() {
-        AssertIsOnMainThread()
-
-        databaseStorage.read { transaction in
-            self.warmCache(transaction: transaction)
-        }
-    }
-
-    private func warmCache(transaction: SDSAnyReadTransaction) {
-        AssertIsOnMainThread()
-
-        _areTypingIndicatorsEnabled = keyValueStore.getBool(kDatabaseKey_TypingIndicatorsEnabled,
-                                                            defaultValue: true,
-                                                            transaction: transaction)
+        _areTypingIndicatorsEnabled.set(enabled)
     }
 
     // MARK: - Dependencies
 
-    private var syncManager: OWSSyncManagerProtocol {
+    private var syncManager: SyncManagerProtocol {
         return SSKEnvironment.shared.syncManager
     }
 
     // MARK: -
 
     @objc
-    public func setTypingIndicatorsEnabled(value: Bool) {
-        AssertIsOnMainThread()
-        Logger.info("\(_areTypingIndicatorsEnabled) -> \(value)")
-        _areTypingIndicatorsEnabled = value
+    public func setTypingIndicatorsEnabledAndSendSyncMessage(value: Bool) {
+        Logger.info("\(_areTypingIndicatorsEnabled.get()) -> \(value)")
+        _areTypingIndicatorsEnabled.set(value)
 
         databaseStorage.write { transaction in
             self.keyValueStore.setBool(value,
@@ -112,14 +107,26 @@ public class TypingIndicatorsImpl: NSObject, TypingIndicators {
 
         syncManager.sendConfigurationSyncMessage()
 
+        SSKEnvironment.shared.storageServiceManager.recordPendingLocalAccountUpdates()
+
+        NotificationCenter.default.postNotificationNameAsync(TypingIndicatorsImpl.typingIndicatorStateDidChange, object: nil)
+    }
+
+    @objc
+    public func setTypingIndicatorsEnabled(value: Bool, transaction: SDSAnyWriteTransaction) {
+        Logger.info("\(_areTypingIndicatorsEnabled.get()) -> \(value)")
+        _areTypingIndicatorsEnabled.set(value)
+
+        keyValueStore.setBool(value,
+                              key: kDatabaseKey_TypingIndicatorsEnabled,
+                              transaction: transaction)
+
         NotificationCenter.default.postNotificationNameAsync(TypingIndicatorsImpl.typingIndicatorStateDidChange, object: nil)
     }
 
     @objc
     public func areTypingIndicatorsEnabled() -> Bool {
-        AssertIsOnMainThread()
-
-        return _areTypingIndicatorsEnabled
+        return _areTypingIndicatorsEnabled.get()
     }
 
     // MARK: -
@@ -329,7 +336,7 @@ public class TypingIndicatorsImpl: NSObject, TypingIndicators {
         }
 
         private func sendTypingMessageIfNecessary(forThread thread: TSThread, action: TypingIndicatorAction) {
-            Logger.verbose("\(TypingIndicatorMessage.string(forTypingIndicatorAction: action))")
+            Logger.verbose("\(action)")
 
             guard let delegate = delegate else {
                 owsFailDebug("Missing delegate.")
@@ -343,7 +350,11 @@ public class TypingIndicatorsImpl: NSObject, TypingIndicators {
             }
 
             let message = TypingIndicatorMessage(thread: thread, action: action)
-            messageSender.sendMessage(.promise, message.asPreparer).retainUntilComplete()
+            firstly {
+                messageSender.sendMessage(.promise, message.asPreparer)
+            }.catch { error in
+                Logger.error("Error: \(error)")
+            }
         }
     }
 

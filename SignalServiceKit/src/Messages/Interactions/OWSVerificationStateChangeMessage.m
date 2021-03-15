@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSVerificationStateChangeMessage.h"
@@ -10,15 +10,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSVerificationStateChangeMessage
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                           thread:(TSThread *)thread
-                 recipientAddress:(SignalServiceAddress *)recipientAddress
-                verificationState:(OWSVerificationState)verificationState
-                    isLocalChange:(BOOL)isLocalChange
+- (instancetype)initWithThread:(TSThread *)thread
+              recipientAddress:(SignalServiceAddress *)recipientAddress
+             verificationState:(OWSVerificationState)verificationState
+                 isLocalChange:(BOOL)isLocalChange
 {
     OWSAssertDebug(recipientAddress.isValid);
 
-    self = [super initWithTimestamp:timestamp inThread:thread messageType:TSInfoMessageVerificationStateChange];
+    self = [super initWithThread:thread messageType:TSInfoMessageVerificationStateChange];
     if (!self) {
         return self;
     }
@@ -30,7 +29,7 @@ NS_ASSUME_NONNULL_BEGIN
     return self;
 }
 
-- (instancetype)initWithCoder:(NSCoder *)coder
+- (nullable instancetype)initWithCoder:(NSCoder *)coder
 {
     self = [super initWithCoder:coder];
     if (self) {
@@ -49,13 +48,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 // clang-format off
 
-- (instancetype)initWithUniqueId:(NSString *)uniqueId
+- (instancetype)initWithGrdbId:(int64_t)grdbId
+                      uniqueId:(NSString *)uniqueId
              receivedAtTimestamp:(uint64_t)receivedAtTimestamp
                           sortId:(uint64_t)sortId
                        timestamp:(uint64_t)timestamp
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -65,10 +66,10 @@ NS_ASSUME_NONNULL_BEGIN
                      linkPreview:(nullable OWSLinkPreview *)linkPreview
                   messageSticker:(nullable MessageSticker *)messageSticker
                    quotedMessage:(nullable TSQuotedMessage *)quotedMessage
-                   schemaVersion:(NSUInteger)schemaVersion
     storedShouldStartExpireTimer:(BOOL)storedShouldStartExpireTimer
+              wasRemotelyDeleted:(BOOL)wasRemotelyDeleted
                    customMessage:(nullable NSString *)customMessage
-        infoMessageSchemaVersion:(NSUInteger)infoMessageSchemaVersion
+             infoMessageUserInfo:(nullable NSDictionary<InfoMessageUserInfoKey, id> *)infoMessageUserInfo
                      messageType:(TSInfoMessageType)messageType
                             read:(BOOL)read
              unregisteredAddress:(nullable SignalServiceAddress *)unregisteredAddress
@@ -76,13 +77,15 @@ NS_ASSUME_NONNULL_BEGIN
                 recipientAddress:(SignalServiceAddress *)recipientAddress
                verificationState:(OWSVerificationState)verificationState
 {
-    self = [super initWithUniqueId:uniqueId
+    self = [super initWithGrdbId:grdbId
+                        uniqueId:uniqueId
                receivedAtTimestamp:receivedAtTimestamp
                             sortId:sortId
                          timestamp:timestamp
                     uniqueThreadId:uniqueThreadId
                      attachmentIds:attachmentIds
                               body:body
+                        bodyRanges:bodyRanges
                       contactShare:contactShare
                    expireStartedAt:expireStartedAt
                          expiresAt:expiresAt
@@ -92,10 +95,10 @@ NS_ASSUME_NONNULL_BEGIN
                        linkPreview:linkPreview
                     messageSticker:messageSticker
                      quotedMessage:quotedMessage
-                     schemaVersion:schemaVersion
       storedShouldStartExpireTimer:storedShouldStartExpireTimer
+                wasRemotelyDeleted:wasRemotelyDeleted
                      customMessage:customMessage
-          infoMessageSchemaVersion:infoMessageSchemaVersion
+               infoMessageUserInfo:infoMessageUserInfo
                        messageType:messageType
                               read:read
                unregisteredAddress:unregisteredAddress];

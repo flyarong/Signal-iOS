@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSAttachmentPointer.h"
@@ -10,6 +10,25 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+NSString *NSStringForTSAttachmentPointerState(TSAttachmentPointerState value)
+{
+    switch (value) {
+        case TSAttachmentPointerStateEnqueued:
+            return @"Enqueued";
+        case TSAttachmentPointerStateDownloading:
+            return @"Downloading";
+        case TSAttachmentPointerStateFailed:
+            return @"Failed";
+        case TSAttachmentPointerStatePendingMessageRequest:
+            return @"PendingMessageRequest";
+        case TSAttachmentPointerStatePendingManualDownload:
+            return @"PendingManualDownload";
+        default:
+            OWSCFailDebug(@"Invalid value.");
+            return @"Invalid value";
+    }
+}
+
 @interface TSAttachmentStream (TSAttachmentPointer)
 
 - (CGSize)cachedMediaSize;
@@ -19,6 +38,8 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark -
 
 @interface TSAttachmentPointer ()
+
+@property (nonatomic) TSAttachmentPointerState state;
 
 // Optional property.  Only set for attachments which need "lazy backup restore."
 @property (nonatomic, nullable) NSString *lazyRestoreFragmentId;
@@ -51,6 +72,8 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (instancetype)initWithServerId:(UInt64)serverId
+                          cdnKey:(NSString *)cdnKey
+                       cdnNumber:(UInt32)cdnNumber
                              key:(NSData *)key
                           digest:(nullable NSData *)digest
                        byteCount:(UInt32)byteCount
@@ -60,14 +83,20 @@ NS_ASSUME_NONNULL_BEGIN
                   albumMessageId:(nullable NSString *)albumMessageId
                   attachmentType:(TSAttachmentType)attachmentType
                        mediaSize:(CGSize)mediaSize
+                        blurHash:(nullable NSString *)blurHash
+                 uploadTimestamp:(unsigned long long)uploadTimestamp
 {
     self = [super initWithServerId:serverId
+                            cdnKey:cdnKey
+                         cdnNumber:cdnNumber
                      encryptionKey:key
                          byteCount:byteCount
                        contentType:contentType
                     sourceFilename:sourceFilename
                            caption:caption
-                    albumMessageId:albumMessageId];
+                    albumMessageId:albumMessageId
+                          blurHash:blurHash
+                   uploadTimestamp:uploadTimestamp];
     if (!self) {
         return self;
     }
@@ -108,35 +137,40 @@ NS_ASSUME_NONNULL_BEGIN
 
 // clang-format off
 
-- (instancetype)initWithUniqueId:(NSString *)uniqueId
+- (instancetype)initWithGrdbId:(int64_t)grdbId
+                      uniqueId:(NSString *)uniqueId
                   albumMessageId:(nullable NSString *)albumMessageId
-         attachmentSchemaVersion:(NSUInteger)attachmentSchemaVersion
                   attachmentType:(TSAttachmentType)attachmentType
+                        blurHash:(nullable NSString *)blurHash
                        byteCount:(unsigned int)byteCount
                          caption:(nullable NSString *)caption
+                          cdnKey:(NSString *)cdnKey
+                       cdnNumber:(unsigned int)cdnNumber
                      contentType:(NSString *)contentType
                    encryptionKey:(nullable NSData *)encryptionKey
-                    isDownloaded:(BOOL)isDownloaded
                         serverId:(unsigned long long)serverId
                   sourceFilename:(nullable NSString *)sourceFilename
+                 uploadTimestamp:(unsigned long long)uploadTimestamp
                           digest:(nullable NSData *)digest
            lazyRestoreFragmentId:(nullable NSString *)lazyRestoreFragmentId
                        mediaSize:(CGSize)mediaSize
-  mostRecentFailureLocalizedText:(nullable NSString *)mostRecentFailureLocalizedText
                      pointerType:(TSAttachmentPointerType)pointerType
                            state:(TSAttachmentPointerState)state
 {
-    self = [super initWithUniqueId:uniqueId
+    self = [super initWithGrdbId:grdbId
+                        uniqueId:uniqueId
                     albumMessageId:albumMessageId
-           attachmentSchemaVersion:attachmentSchemaVersion
                     attachmentType:attachmentType
+                          blurHash:blurHash
                          byteCount:byteCount
                            caption:caption
+                            cdnKey:cdnKey
+                         cdnNumber:cdnNumber
                        contentType:contentType
                      encryptionKey:encryptionKey
-                      isDownloaded:isDownloaded
                           serverId:serverId
-                    sourceFilename:sourceFilename];
+                    sourceFilename:sourceFilename
+                   uploadTimestamp:uploadTimestamp];
 
     if (!self) {
         return self;
@@ -145,7 +179,6 @@ NS_ASSUME_NONNULL_BEGIN
     _digest = digest;
     _lazyRestoreFragmentId = lazyRestoreFragmentId;
     _mediaSize = mediaSize;
-    _mostRecentFailureLocalizedText = mostRecentFailureLocalizedText;
     _pointerType = pointerType;
     _state = state;
 
@@ -159,7 +192,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable TSAttachmentPointer *)attachmentPointerFromProto:(SSKProtoAttachmentPointer *)attachmentProto
                                                 albumMessage:(nullable TSMessage *)albumMessage
 {
-    if (attachmentProto.id < 1) {
+    // TODO: Use the cdnKey and cdnNumber to fetch the attachment
+    if (attachmentProto.cdnID < 1 && attachmentProto.cdnKey.length < 1) {
         OWSFailDebug(@"Invalid attachment id.");
         return nil;
     }
@@ -190,6 +224,8 @@ NS_ASSUME_NONNULL_BEGIN
         UInt32 flags = attachmentProto.flags;
         if ((flags & (UInt32)SSKProtoAttachmentPointerFlagsVoiceMessage) > 0) {
             attachmentType = TSAttachmentTypeVoiceMessage;
+        } else if ((flags & (UInt32)SSKProtoAttachmentPointerFlagsBorderless) > 0) {
+            attachmentType = TSAttachmentTypeBorderless;
         }
     }
     NSString *_Nullable caption;
@@ -208,12 +244,28 @@ NS_ASSUME_NONNULL_BEGIN
         mediaSize = CGSizeMake(attachmentProto.width, attachmentProto.height);
     }
 
-    UInt64 serverId = attachmentProto.id;
+    UInt64 serverId = attachmentProto.cdnID;
     if (![SDS fitsInInt64:serverId]) {
         OWSFailDebug(@"Invalid server id.");
         return nil;
     }
+
+    NSString *_Nullable blurHash;
+    if (contentType.length > 0 && [MIMETypeUtil isVisualMedia:contentType] && attachmentProto.hasBlurHash) {
+        blurHash = attachmentProto.blurHash;
+        if (![BlurHash isValidBlurHash:blurHash]) {
+            blurHash = nil;
+        }
+    }
+
+    unsigned long long uploadTimestamp = 0;
+    if (attachmentProto.hasUploadTimestamp) {
+        uploadTimestamp = attachmentProto.uploadTimestamp;
+    }
+
     TSAttachmentPointer *pointer = [[TSAttachmentPointer alloc] initWithServerId:serverId
+                                                                          cdnKey:attachmentProto.cdnKey
+                                                                       cdnNumber:attachmentProto.cdnNumber
                                                                              key:attachmentProto.key
                                                                           digest:digest
                                                                        byteCount:attachmentProto.size
@@ -222,7 +274,9 @@ NS_ASSUME_NONNULL_BEGIN
                                                                          caption:caption
                                                                   albumMessageId:albumMessageId
                                                                   attachmentType:attachmentType
-                                                                       mediaSize:mediaSize];
+                                                                       mediaSize:mediaSize
+                                                                        blurHash:blurHash
+                                                                 uploadTimestamp:uploadTimestamp];
     return pointer;
 }
 
@@ -329,6 +383,34 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"Missing uniqueId.");
     }
 #endif
+}
+
+#if TESTABLE_BUILD
+- (void)setAttachmentPointerStateDebug:(TSAttachmentPointerState)state
+{
+    self.state = state;
+}
+#endif
+
+- (void)updateWithAttachmentPointerState:(TSAttachmentPointerState)state
+                             transaction:(SDSAnyWriteTransaction *)transaction
+{
+    [self anyUpdateAttachmentPointerWithTransaction:transaction
+                                              block:^(TSAttachmentPointer *attachmentPointer) {
+                                                  attachmentPointer.state = state;
+                                              }];
+}
+
+- (void)updateAttachmentPointerStateFrom:(TSAttachmentPointerState)oldState
+                                      to:(TSAttachmentPointerState)newState
+                             transaction:(SDSAnyWriteTransaction *)transaction
+{
+    [self anyUpdateAttachmentPointerWithTransaction:transaction
+                                              block:^(TSAttachmentPointer *attachmentPointer) {
+                                                  if (attachmentPointer.state == oldState) {
+                                                      attachmentPointer.state = newState;
+                                                  }
+                                              }];
 }
 
 @end

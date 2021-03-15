@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -18,16 +18,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (nullable PhoneNumber *)tryParsePhoneNumberFromUserSpecifiedText:(NSString *)text;
 + (nullable PhoneNumber *)tryParsePhoneNumberFromE164:(NSString *)text;
++ (nullable PhoneNumber *)phoneNumberFromUserSpecifiedText:(NSString *)text;
 
 // This will try to parse the input text as a phone number using
 // the default region and the country code for this client's phone
 // number.
 //
 // Order matters; better results will appear first.
-+ (NSArray<PhoneNumber *> *)tryParsePhoneNumbersFromsUserSpecifiedText:(NSString *)text
++ (NSArray<PhoneNumber *> *)tryParsePhoneNumbersFromUserSpecifiedText:(NSString *)text
                                                      clientPhoneNumber:(NSString *)clientPhoneNumber;
 
-+ (NSString *)removeFormattingCharacters:(NSString *)inputString;
 + (NSString *)bestEffortFormatPartialUserSpecifiedTextToLookLikeAPhoneNumber:(NSString *)input;
 + (NSString *)bestEffortFormatPartialUserSpecifiedTextToLookLikeAPhoneNumber:(NSString *)input
                                               withSpecifiedCountryCodeString:(NSString *)countryCodeString;

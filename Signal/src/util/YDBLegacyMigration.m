@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "YDBLegacyMigration.h"
@@ -13,6 +13,7 @@
 #import <SignalServiceKit/OWSPrimaryStorage.h>
 #import <SignalServiceKit/OWSUserProfile.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/StorageCoordinator.h>
 #import <SignalServiceKit/TSAttachmentStream.h>
 #import <YapDatabase/YapDatabaseCryptoUtils.h>
 
@@ -28,7 +29,8 @@ NS_ASSUME_NONNULL_BEGIN
         // * Successfully completed launch process at least once in the post-SAE world.
         // * Successfully completed launch process at least once in the post-GRDB world.
         [OWSPreferences setIsYdbReadyForAppExtensions];
-        if (SSKFeatureFlags.storageMode == StorageModeGrdb) {
+
+        if (StorageCoordinator.dataStoreForUI == DataStoreGrdb) {
             [OWSPreferences setIsGrdbReadyForAppExtensions];
         }
     }
@@ -38,9 +40,7 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSAssertDebug(errorHandle != nil);
 
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-        [self appDidBecomeReady];
-    }];
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{ [self appDidBecomeReady]; });
 
     if ([OWSPreferences isReadyForAppExtensions]) {
         return YES;

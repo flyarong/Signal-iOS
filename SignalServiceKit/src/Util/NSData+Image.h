@@ -1,8 +1,45 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
+
+
+typedef NS_CLOSED_ENUM(NSInteger, ImageFormat) {
+    ImageFormat_Unknown,
+    ImageFormat_Png,
+    ImageFormat_Gif,
+    ImageFormat_Tiff,
+    ImageFormat_Jpeg,
+    ImageFormat_Bmp,
+    ImageFormat_Webp,
+    ImageFormat_Heic,
+    ImageFormat_Heif,
+    ImageFormat_LottieSticker,
+};
+
+NSString *NSStringForImageFormat(ImageFormat value);
+
+NSString *_Nullable MIMETypeForImageFormat(ImageFormat value);
+
+#pragma mark -
+
+@interface ImageMetadata : NSObject
+
+@property (nonatomic, readonly) BOOL isValid;
+
+// These properties are only set if isValid is true.
+@property (nonatomic, readonly) ImageFormat imageFormat;
+@property (nonatomic, readonly) CGSize pixelSize;
+@property (nonatomic, readonly) BOOL hasAlpha;
+@property (nonatomic, readonly) BOOL isAnimated;
+
+@property (nonatomic, readonly, nullable) NSString *mimeType;
+@property (nonatomic, readonly, nullable) NSString *fileExtension;
+
+@end
+
+#pragma mark -
 
 @interface NSData (Image)
 
@@ -17,13 +54,25 @@ NS_ASSUME_NONNULL_BEGIN
 // Returns the image size in pixels.
 //
 // Returns CGSizeZero on error.
-+ (CGSize)imageSizeForFilePath:(NSString *)filePath mimeType:(NSString *)mimeType;
++ (CGSize)imageSizeForFilePath:(NSString *)filePath mimeType:(nullable NSString *)mimeType;
 
 + (BOOL)hasAlphaForValidImageFilePath:(NSString *)filePath;
 
+@property (nonatomic, readonly) BOOL isMaybeWebpData;
 - (nullable UIImage *)stillForWebpData;
 
-- (BOOL)ows_isValidGroupAvatarPng;
++ (BOOL)ows_hasStickerLikePropertiesWithPath:(NSString *)filePath;
+- (BOOL)ows_hasStickerLikeProperties;
+
+#pragma mark - Image Metadata
+
+// declaredMimeType is optional.
+// If present, it is used to validate the file format contents.
++ (ImageMetadata *)imageMetadataWithPath:(NSString *)filePath mimeType:(nullable NSString *)declaredMimeType;
+
+// filePath and declaredMimeType are optional.
+// If present, they are used to validate the file format contents.
+- (ImageMetadata *)imageMetadataWithPath:(nullable NSString *)filePath mimeType:(nullable NSString *)declaredMimeType;
 
 @end
 

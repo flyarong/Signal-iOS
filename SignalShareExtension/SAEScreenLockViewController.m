@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "SAEScreenLockViewController.h"
-#import "UIColor+OWS.h"
 #import <SignalMessaging/SignalMessaging-Swift.h>
+#import <SignalMessaging/Theme.h>
 #import <SignalServiceKit/AppContext.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -41,7 +41,7 @@ NS_ASSUME_NONNULL_BEGIN
 {
     [super loadView];
 
-    self.view.backgroundColor = [UIColor ows_materialBlueColor];
+    self.view.backgroundColor = Theme.launchScreenBackgroundColor;
 
     self.title = NSLocalizedString(@"SHARE_EXTENSION_VIEW_TITLE", @"Title for the 'share extension' view.");
 
@@ -90,15 +90,16 @@ NS_ASSUME_NONNULL_BEGIN
 
     self.isShowingAuthUI = YES;
 
-    [OWSScreenLock.sharedManager tryToUnlockScreenLockWithSuccess:^{
-        OWSAssertIsOnMainThread();
+    [OWSScreenLock.shared
+        tryToUnlockScreenLockWithSuccess:^{
+            OWSAssertIsOnMainThread();
 
-        OWSLogInfo(@"unlock screen lock succeeded.");
+            OWSLogInfo(@"unlock screen lock succeeded.");
 
-        self.isShowingAuthUI = NO;
+            self.isShowingAuthUI = NO;
 
-        [self.shareViewDelegate shareViewWasUnlocked];
-    }
+            [self.shareViewDelegate shareViewWasUnlocked];
+        }
         failure:^(NSError *error) {
             OWSAssertIsOnMainThread();
 
@@ -146,15 +147,15 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSAssertIsOnMainThread();
 
-    [OWSAlerts showAlertWithTitle:NSLocalizedString(@"SCREEN_LOCK_UNLOCK_FAILED",
-                                      @"Title for alert indicating that screen lock could not be unlocked.")
-                          message:message
-                      buttonTitle:nil
-                     buttonAction:^(UIAlertAction *action) {
-                         // After the alert, update the UI.
-                         [self ensureUI];
-                     }
-               fromViewController:self];
+    [OWSActionSheets showActionSheetWithTitle:NSLocalizedString(@"SCREEN_LOCK_UNLOCK_FAILED",
+                                                  @"Title for alert indicating that screen lock could not be unlocked.")
+                                      message:message
+                                  buttonTitle:nil
+                                 buttonAction:^(ActionSheetAction *action) {
+                                     // After the alert, update the UI.
+                                     [self ensureUI];
+                                 }
+                           fromViewController:self];
 }
 
 - (void)dismissPressed:(id)sender

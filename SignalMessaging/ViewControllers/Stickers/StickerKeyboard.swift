@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -14,14 +14,6 @@ public protocol StickerKeyboardDelegate {
 
 @objc
 public class StickerKeyboard: CustomKeyboard {
-
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    // MARK: -
 
     @objc
     public weak var delegate: StickerKeyboardDelegate?
@@ -52,6 +44,11 @@ public class StickerKeyboard: CustomKeyboard {
                                                selector: #selector(stickersOrPacksDidChange),
                                                name: StickerManager.stickersOrPacksDidChange,
                                                object: nil)
+
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(keyboardFrameDidChange),
+                                               name: UIResponder.keyboardDidChangeFrameNotification,
+                                               object: nil)
     }
 
     required public init(coder: NSCoder) {
@@ -78,13 +75,16 @@ public class StickerKeyboard: CustomKeyboard {
 
         // If there are no recents, default to showing the first sticker pack.
         if currentPageCollectionView.stickerCount < 1 {
-            selectedStickerPack = stickerPacks.first
+            updateSelectedStickerPack(stickerPacks.first)
         }
 
         updatePageConstraints()
     }
 
+    private let reusableStickerViewCache = NSCache<StickerInfo, StickerReusableView>()
     private func reloadStickers() {
+        let oldStickerPacks = stickerPacks
+
         databaseStorage.read { (transaction) in
             self.stickerPacks = StickerManager.installedStickerPacks(transaction: transaction).sorted {
                 $0.dateCreated > $1.dateCreated
@@ -92,36 +92,56 @@ public class StickerKeyboard: CustomKeyboard {
         }
 
         var items = [StickerHorizontalListViewItem]()
-        items.append(StickerHorizontalListViewItemRecents(didSelectBlock: { [weak self] in
-            self?.recentsButtonWasTapped()
-            }, isSelectedBlock: { [weak self] in
+        items.append(StickerHorizontalListViewItemRecents(
+            didSelectBlock: { [weak self] in
+                self?.recentsButtonWasTapped()
+            },
+            isSelectedBlock: { [weak self] in
                 self?.selectedStickerPack == nil
-        }))
+            }
+        ))
         items += stickerPacks.map { (stickerPack) in
-            StickerHorizontalListViewItemSticker(stickerInfo: stickerPack.coverInfo,
-                                                 didSelectBlock: { [weak self] in
-                                                    self?.selectedStickerPack = stickerPack
-                }, isSelectedBlock: { [weak self] in
+            StickerHorizontalListViewItemSticker(
+                stickerInfo: stickerPack.coverInfo,
+                didSelectBlock: { [weak self] in
+                    self?.updateSelectedStickerPack(stickerPack)
+                },
+                isSelectedBlock: { [weak self] in
                     self?.selectedStickerPack?.info == stickerPack.info
-            })
+                },
+                cache: reusableStickerViewCache
+            )
         }
         packsCollectionView.items = items
 
         guard stickerPacks.count > 0 else {
-            selectedStickerPack = nil
+            _ = resignFirstResponder()
             return
         }
 
-        // Update paging to reflect any potentially new ordering of sticker packs
-        selectedPackChanged(oldSelectedPack: nil)
+        guard oldStickerPacks != stickerPacks else { return }
+
+        // If the selected pack was uninstalled, select the first pack.
+        if let selectedStickerPack = selectedStickerPack, !stickerPacks.contains(selectedStickerPack) {
+            updateSelectedStickerPack(stickerPacks.first)
+        }
+
+        resetStickerPages()
     }
 
     private static let packCoverSize: CGFloat = 32
     private static let packCoverInset: CGFloat = 4
     private static let packCoverSpacing: CGFloat = 4
-    private let packsCollectionView = StickerHorizontalListView(cellSize: StickerKeyboard.packCoverSize,
-                                                                cellInset: StickerKeyboard.packCoverInset,
-                                                                spacing: StickerKeyboard.packCoverSpacing)
+    private let packsCollectionView: StickerHorizontalListView = {
+        let view = StickerHorizontalListView(cellSize: StickerKeyboard.packCoverSize,
+                                             cellInset: StickerKeyboard.packCoverInset,
+                                             spacing: StickerKeyboard.packCoverSpacing)
+
+        view.contentInset = .zero
+        view.autoSetDimension(.height, toSize: StickerKeyboard.packCoverSize + view.contentInset.top + view.contentInset.bottom)
+
+        return view
+    }()
 
     private func populateHeaderView() {
         headerView.spacing = StickerKeyboard.packCoverSpacing
@@ -152,7 +172,7 @@ public class StickerKeyboard: CustomKeyboard {
     }
 
     private func buildHeaderButton(_ imageName: String, block: @escaping () -> Void) -> UIView {
-        let button = OWSButton(imageName: imageName, tintColor: Theme.secondaryColor, block: block)
+        let button = OWSButton(imageName: imageName, tintColor: Theme.secondaryTextAndIconColor, block: block)
         button.setContentHuggingHigh()
         button.setCompressionResistanceHigh()
         return button
@@ -173,9 +193,7 @@ public class StickerKeyboard: CustomKeyboard {
         updateHeaderView()
     }
 
-    public override func orientationDidChange() {
-        super.orientationDidChange()
-
+    @objc func keyboardFrameDidChange() {
         Logger.verbose("")
 
         updatePageConstraints(ignoreScrollingState: true)
@@ -195,7 +213,12 @@ public class StickerKeyboard: CustomKeyboard {
         Logger.verbose("")
 
         // nil is used for the recents special-case.
-        selectedStickerPack = nil
+        updateSelectedStickerPack(nil)
+    }
+
+    private func updateSelectedStickerPack(_ stickerPack: StickerPack?, scrollToSelected: Bool = false) {
+        selectedStickerPack = stickerPack
+        packsCollectionView.updateSelections(scrollToSelectedItem: scrollToSelected)
     }
 
     private func manageButtonWasTapped() {
@@ -208,7 +231,7 @@ public class StickerKeyboard: CustomKeyboard {
 
     // MARK: - Paging
 
-    /// This array always includes three collection views, where the indeces represent:
+    /// This array always includes three collection views, where the indices represent:
     /// 0 - Previous Page
     /// 1 - Current Page
     /// 2 - Next Page
@@ -351,8 +374,17 @@ public class StickerKeyboard: CustomKeyboard {
         if !isScrollingChange { applyPendingPageChangeUpdates() }
 
         updatePageConstraints()
+    }
 
-        // Update the selected pack in the top bar.
+    private func resetStickerPages() {
+        currentPageCollectionView.showInstalledPackOrRecents(stickerPack: selectedStickerPack)
+        previousPageCollectionView.showInstalledPackOrRecents(stickerPack: previousPageStickerPack)
+        nextPageCollectionView.showInstalledPackOrRecents(stickerPack: nextPageStickerPack)
+
+        pendingPageChangeUpdates = nil
+
+        updatePageConstraints()
+
         packsCollectionView.updateSelections()
     }
 
@@ -416,11 +448,11 @@ public class StickerKeyboard: CustomKeyboard {
 
         // Scrolled left a page
         if offsetX <= previousPageThreshold {
-            selectedStickerPack = previousPageStickerPack
+            updateSelectedStickerPack(previousPageStickerPack, scrollToSelected: true)
 
             // Scrolled right a page
         } else if offsetX >= nextPageThreshold {
-            selectedStickerPack = nextPageStickerPack
+            updateSelectedStickerPack(nextPageStickerPack, scrollToSelected: true)
 
             // We're about to cross the threshold into a new page, execute any pending updates.
             // We wait to execute these until we're sure we're going to cross over as it

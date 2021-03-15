@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -55,17 +55,15 @@ class SSKMessageSenderJobRecordSerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = model.sortId > 0 ? Int64(model.sortId) : nil
+        let id: Int64? = model.sortId > 0 ? Int64(model.sortId) : model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .messageSenderJobRecord
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
+        // Properties
         let failureCount: UInt = model.failureCount
         let label: String = model.label
         let status: SSKJobRecordStatus = model.status
-
-        // Subclass properties
         let attachmentIdMap: Data? = nil
         let contactThreadId: String? = nil
         let envelopeData: Data? = nil
@@ -73,7 +71,10 @@ class SSKMessageSenderJobRecordSerializer: SDSSerializer {
         let messageId: String? = model.messageId
         let removeMessageAfterSending: Bool? = model.removeMessageAfterSending
         let threadId: String? = model.threadId
+        let attachmentId: String? = nil
+        let isMediaMessage: Bool? = model.isMediaMessage
+        let serverDeliveryTimestamp: UInt64? = nil
 
-        return JobRecordRecord(id: id, recordType: recordType, uniqueId: uniqueId, failureCount: failureCount, label: label, status: status, attachmentIdMap: attachmentIdMap, contactThreadId: contactThreadId, envelopeData: envelopeData, invisibleMessage: invisibleMessage, messageId: messageId, removeMessageAfterSending: removeMessageAfterSending, threadId: threadId)
+        return JobRecordRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, failureCount: failureCount, label: label, status: status, attachmentIdMap: attachmentIdMap, contactThreadId: contactThreadId, envelopeData: envelopeData, invisibleMessage: invisibleMessage, messageId: messageId, removeMessageAfterSending: removeMessageAfterSending, threadId: threadId, attachmentId: attachmentId, isMediaMessage: isMediaMessage, serverDeliveryTimestamp: serverDeliveryTimestamp)
     }
 }

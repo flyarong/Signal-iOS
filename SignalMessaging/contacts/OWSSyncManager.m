@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSSyncManager.h"
@@ -8,22 +8,31 @@
 #import "OWSPreferences.h"
 #import "OWSProfileManager.h"
 #import "OWSReadReceiptManager.h"
+#import <Contacts/Contacts.h>
 #import <PromiseKit/AnyPromise.h>
 #import <SignalCoreKit/Cryptography.h>
+#import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/AppReadiness.h>
 #import <SignalServiceKit/DataSource.h>
 #import <SignalServiceKit/MIMETypeUtil.h>
+#import <SignalServiceKit/MessageSender.h>
+#import <SignalServiceKit/NSNotificationCenter+OWS.h>
 #import <SignalServiceKit/OWSError.h>
-#import <SignalServiceKit/OWSMessageSender.h>
 #import <SignalServiceKit/OWSSyncConfigurationMessage.h>
 #import <SignalServiceKit/OWSSyncContactsMessage.h>
+#import <SignalServiceKit/OWSSyncFetchLatestMessage.h>
 #import <SignalServiceKit/OWSSyncGroupsMessage.h>
+#import <SignalServiceKit/OWSSyncKeysMessage.h>
+#import <SignalServiceKit/OWSSyncRequestMessage.h>
 #import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalAccount.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSAccountManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+NSString *const OWSSyncManagerConfigurationSyncDidCompleteNotification = @"OWSSyncManagerConfigurationSyncDidCompleteNotification";
+NSString *const OWSSyncManagerKeysSyncDidCompleteNotification = @"OWSSyncManagerKeysSyncDidCompleteNotification";
 
 NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManagerLastMessageKey";
 
@@ -59,32 +68,46 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
 
     OWSSingletonAssert();
 
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(signalAccountsDidChange:)
-                                                 name:OWSContactsManagerSignalAccountsDidChangeNotification
-                                               object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(profileKeyDidChange:)
-                                                 name:kNSNotificationName_ProfileKeyDidChange
-                                               object:nil];
-
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+    AppReadinessRunNowOrWhenAppDidBecomeReadyAsync(^{
+        [self addObservers];
+        
         if ([self.tsAccountManager isRegisteredAndReady]) {
             OWSAssertDebug(self.contactsManager.isSetup);
 
-            // Flush any pending changes.
-            //
-            // sendSyncContactsMessageIfNecessary will skipIfRedundant,
-            // so this won't yield redundant traffic.
-            [self sendSyncContactsMessageIfNecessary];
+            if (self.tsAccountManager.isPrimaryDevice) {
+                // Flush any pending changes.
+                //
+                // sendSyncContactsMessageIfNecessary will skipIfRedundant,
+                // so this won't yield redundant traffic.
+                [self sendSyncContactsMessageIfNecessary];
+            } else {
+                [self sendAllSyncRequestMessages].catch(^(NSError *error) {
+                    OWSLogError(@"Error: %@.", error);
+                });
+            }
         }
-    }];
+    });
 
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)addObservers {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(signalAccountsDidChange:)
+                                                 name:OWSContactsManagerSignalAccountsDidChangeNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(profileKeyDidChange:)
+                                                 name:kNSNotificationNameProfileKeyDidChange
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(registrationStateDidChange)
+                                                 name:NSNotificationNameRegistrationStateDidChange
+                                               object:nil];
 }
 
 #pragma mark - Dependencies
@@ -101,7 +124,8 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
     return SSKEnvironment.shared.identityManager;
 }
 
-- (OWSMessageSender *)messageSender {
+- (MessageSender *)messageSender
+{
     OWSAssertDebug(SSKEnvironment.shared.messageSender);
 
     return SSKEnvironment.shared.messageSender;
@@ -122,7 +146,7 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
 
 - (TSAccountManager *)tsAccountManager
 {
-    return TSAccountManager.sharedInstance;
+    return TSAccountManager.shared;
 }
 
 - (id<OWSTypingIndicators>)typingIndicators
@@ -133,6 +157,16 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
 - (SDSDatabaseStorage *)databaseStorage
 {
     return SDSDatabaseStorage.shared;
+}
+
+- (OWSIncomingContactSyncJobQueue *)incomingContactSyncJobQueue
+{
+    return Environment.shared.incomingContactSyncJobQueue;
+}
+
+- (OWSIncomingGroupSyncJobQueue *)incomingGroupSyncJobQueue
+{
+    return Environment.shared.incomingGroupSyncJobQueue;
 }
 
 #pragma mark - Notifications
@@ -149,23 +183,33 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
     [self sendSyncContactsMessageIfPossible];
 }
 
+- (void)registrationStateDidChange
+{
+    OWSAssertIsOnMainThread();
+
+    [self sendSyncContactsMessageIfPossible];
+}
+
 #pragma mark - Methods
 
 - (void)sendSyncContactsMessageIfPossible {
     OWSAssertIsOnMainThread();
 
+    if (!AppReadiness.isAppReady) {
+        // Don't bother if app hasn't finished setup.
+        return;
+    }
     if (!self.contactsManager.isSetup) {
         // Don't bother if the contacts manager hasn't finished setup.
         return;
     }
-
-    if ([TSAccountManager sharedInstance].isRegisteredAndReady) {
+    if (self.tsAccountManager.isRegisteredAndReady && self.tsAccountManager.isRegisteredPrimaryDevice) {
         [self sendSyncContactsMessageIfNecessary];
     }
 }
 
 - (void)sendConfigurationSyncMessage {
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+    AppReadinessRunNowOrWhenAppDidBecomeReadyAsync(^{
         if (!self.tsAccountManager.isRegisteredAndReady) {
             return;
         }
@@ -173,13 +217,13 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
         dispatch_async(dispatch_get_main_queue(), ^{
             [self sendConfigurationSyncMessage_AppReady];
         });
-    }];
+    });
 }
 
 - (void)sendConfigurationSyncMessage_AppReady {
     DDLogInfo(@"");
 
-    if (![TSAccountManager sharedInstance].isRegisteredAndReady) {
+    if (!self.tsAccountManager.isRegisteredAndReady) {
         return;
     }
 
@@ -187,7 +231,7 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
     BOOL showUnidentifiedDeliveryIndicators = Environment.shared.preferences.shouldShowUnidentifiedDeliveryIndicators;
     BOOL showTypingIndicators = self.typingIndicators.areTypingIndicatorsEnabled;
 
-    [self.databaseStorage asyncWriteWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageAsyncWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         TSThread *_Nullable thread = [TSAccountManager getOrCreateLocalThreadWithTransaction:transaction];
         if (thread == nil) {
             OWSFailDebug(@"Missing thread.");
@@ -204,13 +248,62 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
                                                sendLinkPreviews:sendLinkPreviews];
 
         [self.messageSenderJobQueue addMessage:syncConfigurationMessage.asPreparer transaction:transaction];
+    });
+}
+
+- (void)processIncomingConfigurationSyncMessage:(SSKProtoSyncMessageConfiguration *)syncMessage transaction:(SDSAnyWriteTransaction *)transaction
+{
+    if (syncMessage.hasReadReceipts) {
+        [SSKEnvironment.shared.readReceiptManager setAreReadReceiptsEnabled:syncMessage.readReceipts
+                                                                transaction:transaction];
+    }
+    if (syncMessage.hasUnidentifiedDeliveryIndicators) {
+        BOOL updatedValue = syncMessage.unidentifiedDeliveryIndicators;
+        [Environment.shared.preferences setShouldShowUnidentifiedDeliveryIndicators:updatedValue
+                                                                        transaction:transaction];
+    }
+    if (syncMessage.hasTypingIndicators) {
+        [self.typingIndicators setTypingIndicatorsEnabledWithValue:syncMessage.typingIndicators
+                                                       transaction:transaction];
+    }
+    if (syncMessage.hasLinkPreviews) {
+        [SSKPreferences setAreLinkPreviewsEnabled:syncMessage.linkPreviews
+                                  sendSyncMessage:NO
+                                      transaction:transaction];
+    }
+
+    [transaction addAsyncCompletion:^{
+        [[NSNotificationCenter defaultCenter] postNotificationNameAsync:OWSSyncManagerConfigurationSyncDidCompleteNotification
+                                                                 object:nil];
     }];
+}
+
+- (void)processIncomingGroupsSyncMessage:(SSKProtoSyncMessageGroups *)syncMessage transaction:(SDSAnyWriteTransaction *)transaction
+{
+    OWSLogInfo(@"");
+
+    TSAttachmentPointer *attachmentPointer = [TSAttachmentPointer attachmentPointerFromProto:syncMessage.blob albumMessage:nil];
+    [attachmentPointer anyInsertWithTransaction:transaction];
+    [self.incomingGroupSyncJobQueue addWithAttachmentId:attachmentPointer.uniqueId transaction:transaction];
+}
+
+- (void)processIncomingContactsSyncMessage:(SSKProtoSyncMessageContacts *)syncMessage transaction:(SDSAnyWriteTransaction *)transaction
+{
+    TSAttachmentPointer *attachmentPointer = [TSAttachmentPointer attachmentPointerFromProto:syncMessage.blob
+                                                                                albumMessage:nil];
+    [attachmentPointer anyInsertWithTransaction:transaction];
+    [self.incomingContactSyncJobQueue addWithAttachmentId:attachmentPointer.uniqueId transaction:transaction];
 }
 
 #pragma mark - Groups Sync
 
 - (void)syncGroupsWithTransaction:(SDSAnyWriteTransaction *)transaction
 {
+    if (SSKDebugFlags.dontSendContactOrGroupSyncMessages.value) {
+        OWSLogInfo(@"Skipping group sync message.");
+        return;
+    }
+
     TSThread *_Nullable thread = [TSAccountManager getOrCreateLocalThreadWithTransaction:transaction];
     if (thread == nil) {
         OWSFailDebug(@"Missing thread.");
@@ -240,9 +333,12 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
 
 - (AnyPromise *)syncLocalContact
 {
+    // OWSContactsOutputStream requires all signalAccount to have a contact.
+    Contact *contact = [[Contact alloc] initWithSystemContact:[CNContact new]];
     SignalAccount *signalAccount =
-        [[SignalAccount alloc] initWithSignalServiceAddress:self.tsAccountManager.localAddress];
-    signalAccount.contact = [Contact new];
+        [[SignalAccount alloc] initWithSignalServiceAddress:self.tsAccountManager.localAddress
+                                                    contact:contact
+                                   multipleAccountLabelText:nil];
 
     return [self syncContactsForSignalAccounts:@[ signalAccount ] skipIfRedundant:NO debounce:NO];
 }
@@ -261,8 +357,8 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
 
 - (void)sendSyncContactsMessageIfNecessary
 {
-    [[self syncContactsForSignalAccounts:self.contactsManager.signalAccounts skipIfRedundant:YES debounce:YES]
-        retainUntilComplete];
+    OWSAssertDebug(self.tsAccountManager.isRegisteredPrimaryDevice);
+    [self syncContactsForSignalAccounts:self.contactsManager.signalAccounts skipIfRedundant:YES debounce:YES];
 }
 
 - (dispatch_queue_t)serialQueue
@@ -283,8 +379,22 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
                               skipIfRedundant:(BOOL)skipIfRedundant
                                      debounce:(BOOL)debounce
 {
+    if (SSKDebugFlags.dontSendContactOrGroupSyncMessages.value) {
+        OWSLogInfo(@"Skipping contact sync message.");
+        return [AnyPromise promiseWithValue:@(YES)];
+    }
+    if (!self.contactsManager.isSetup) {
+        return [AnyPromise promiseWithValue:OWSErrorMakeAssertionError(@"Contacts manager not yet ready.")];
+    }
+    if (!self.tsAccountManager.isRegisteredPrimaryDevice) {
+        return [AnyPromise promiseWithValue:OWSErrorMakeAssertionError(@"should not sync from secondary device")];
+    }
+    if (!self.tsAccountManager.isRegisteredAndReady) {
+        return [AnyPromise promiseWithValue:OWSErrorMakeAssertionError(@"Not yet registered and ready.")];
+    }
+
     AnyPromise *promise = [AnyPromise promiseWithResolverBlock:^(PMKResolver resolve) {
-        [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+        AppReadinessRunNowOrWhenAppDidBecomeReadyAsync(^{
             dispatch_async(self.serialQueue, ^{
                 if (debounce && self.isRequestInFlight) {
                     // De-bounce.  It's okay if we ignore some new changes;
@@ -349,11 +459,13 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
                                                         OWSLogInfo(@"Successfully sent contacts sync message.");
                                                         
                                                         if (messageHash != nil) {
-                                                            [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-                                                                [OWSSyncManager.keyValueStore setData:messageHash
-                                                                                                  key:kSyncManagerLastContactSyncKey
-                                                                                          transaction:transaction];
-                                                            }];
+                                                            DatabaseStorageWrite(self.databaseStorage,
+                                                                ^(SDSAnyWriteTransaction *transaction) {
+                                                                    [OWSSyncManager.keyValueStore
+                                                                            setData:messageHash
+                                                                                key:kSyncManagerLastContactSyncKey
+                                                                        transaction:transaction];
+                                                                });
                                                         }
                                                         
                                                         dispatch_async(self.serialQueue, ^{
@@ -376,7 +488,7 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
                                                         });
                                                     }];
             });
-        }];
+        });
     }];
     return promise;
 }
@@ -386,6 +498,59 @@ NSString *const kSyncManagerLastContactSyncKey = @"kTSStorageManagerOWSSyncManag
     NSData *_Nullable result = [Cryptography computeSHA256Digest:messageData];
     OWSAssertDebug(result != nil);
     return result;
+}
+
+#pragma mark - Fetch Latest
+
+- (void)sendFetchLatestProfileSyncMessage
+{
+    [self sendFetchLatestSyncMessageWithType:OWSSyncFetchType_LocalProfile];
+}
+
+- (void)sendFetchLatestStorageManifestSyncMessage
+{
+    [self sendFetchLatestSyncMessageWithType:OWSSyncFetchType_StorageManifest];
+}
+
+- (void)sendFetchLatestSyncMessageWithType:(OWSSyncFetchType)fetchType
+{
+    DDLogInfo(@"");
+
+    if (!self.tsAccountManager.isRegisteredAndReady) {
+        OWSFailDebug(@"Unexpectedly tried to send sync message before registration.");
+        return;
+    }
+
+    DatabaseStorageAsyncWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+        TSThread *_Nullable thread = [TSAccountManager getOrCreateLocalThreadWithTransaction:transaction];
+        if (thread == nil) {
+            OWSFailDebug(@"Missing thread.");
+            return;
+        }
+
+        OWSSyncFetchLatestMessage *syncFetchLatestMessage =
+            [[OWSSyncFetchLatestMessage alloc] initWithThread:thread fetchType:fetchType];
+
+        [self.messageSenderJobQueue addMessage:syncFetchLatestMessage.asPreparer transaction:transaction];
+    });
+}
+
+- (void)processIncomingFetchLatestSyncMessage:(SSKProtoSyncMessageFetchLatest *)syncMessage
+                                  transaction:(SDSAnyWriteTransaction *)transaction
+{
+    switch (syncMessage.unwrappedType) {
+        case SSKProtoSyncMessageFetchLatestTypeUnknown:
+            OWSFailDebug(@"Unknown fetch latest type");
+            break;
+        case SSKProtoSyncMessageFetchLatestTypeLocalProfile: {
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+                ^{ [self.profileManager fetchLocalUsersProfile]; });
+            break;
+        }
+        case SSKProtoSyncMessageFetchLatestTypeStorageManifest:
+            [SSKEnvironment.shared.storageServiceManager restoreOrCreateManifestIfNecessary];
+            break;
+    }
 }
 
 @end

@@ -1,28 +1,25 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class MessageBodyRanges;
+
 // This header exposes private properties for SDS serialization.
 
 @interface TSThread (SDS)
 
-@property (nonatomic, nullable, readonly) NSNumber *archivedAsOfMessageSortId;
 @property (nonatomic, copy, nullable, readonly) NSString *messageDraft;
-
-@property (nonatomic, nullable, readonly) NSDate *lastMessageDate DEPRECATED_ATTRIBUTE;
-@property (nonatomic, nullable, readonly) NSDate *archivalDate DEPRECATED_ATTRIBUTE;
+@property (nonatomic, readonly, nullable) MessageBodyRanges *messageDraftBodyRanges;
 
 @end
 
 #pragma mark -
 
 @interface TSMessage (SDS)
-
-@property (nonatomic, readonly) NSUInteger schemaVersion;
 
 // This property is only intended to be used by GRDB queries.
 @property (nonatomic, readonly) BOOL storedShouldStartExpireTimer;
@@ -32,8 +29,6 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark -
 
 @interface TSInfoMessage (SDS)
-
-@property (nonatomic, readonly) NSUInteger infoMessageSchemaVersion;
 
 @property (nonatomic, getter=wasRead) BOOL read;
 
@@ -45,8 +40,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, getter=wasRead) BOOL read;
 
-@property (nonatomic, readonly) NSUInteger errorMessageSchemaVersion;
-
 @end
 
 #pragma mark -
@@ -56,9 +49,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) TSOutgoingMessageState legacyMessageState;
 @property (nonatomic, readonly) BOOL legacyWasDelivered;
 @property (nonatomic, readonly) BOOL hasLegacyMessageState;
-@property (atomic, readonly)
+@property (atomic, nullable, readonly)
     NSDictionary<SignalServiceAddress *, TSOutgoingMessageRecipientState *> *recipientAddressStates;
-@property (nonatomic, readonly) NSUInteger outgoingMessageSchemaVersion;
 @property (nonatomic, readonly) TSOutgoingMessageState storedMessageState;
 
 @end
@@ -80,8 +72,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, getter=wasRead) BOOL read;
 
-@property (nonatomic, readonly) NSUInteger callSchemaVersion;
-
 @end
 
 #pragma mark -
@@ -89,15 +79,6 @@ NS_ASSUME_NONNULL_BEGIN
 @interface TSIncomingMessage (SDS)
 
 @property (nonatomic, getter=wasRead) BOOL read;
-@property (nonatomic, readonly) NSUInteger incomingMessageSchemaVersion;
-
-@end
-
-#pragma mark -
-
-@interface TSAttachment (SDS)
-
-@property (nonatomic, readonly) NSUInteger attachmentSchemaVersion;
 
 @end
 
@@ -122,6 +103,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (atomic, nullable, readonly) NSNumber *isValidImageCached;
 @property (atomic, nullable, readonly) NSNumber *isValidVideoCached;
+@property (atomic, nullable, readonly) NSNumber *isAnimatedCached;
 
 @end
 
@@ -157,27 +139,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@interface SignalAccount (SDS)
-
-@property (nonatomic, readonly) NSUInteger accountSchemaVersion;
-
-@end
-
-#pragma mark -
-
-@interface SignalRecipient (SDS)
-
-@property (nonatomic, readonly) NSUInteger recipientSchemaVersion;
-
-@end
-
-#pragma mark -
-
 @interface TSContactThread (SDS)
 
 @property (nonatomic, nullable, readonly) NSString *contactPhoneNumber;
 @property (nonatomic, nullable, readonly) NSString *contactUUID;
-@property (nonatomic, readonly) NSUInteger contactThreadSchemaVersion;
 
 @end
 
@@ -185,54 +150,31 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OWSUserProfile (SDS)
 
-@property (atomic, readonly) NSUInteger userProfileSchemaVersion;
 @property (atomic, nullable, readonly) NSString *recipientPhoneNumber;
 @property (atomic, nullable, readonly) NSString *recipientUUID;
+@property (atomic, nullable, readonly) NSString *profileName;
 
 @end
 
 #pragma mark -
 
-@interface OWSLinkedDeviceReadReceipt (SDS)
+@interface OWSReaction (SDS)
 
-@property (nonatomic, nullable, readonly) NSString *senderPhoneNumber;
-@property (nonatomic, nullable, readonly) NSString *senderUUID;
-@property (nonatomic, readonly) NSUInteger linkedDeviceReadReceiptSchemaVersion;
-
-@end
-
-#pragma mark -
-
-@interface OWSRecipientIdentity (SDS)
-
-@property (nonatomic, readonly) NSUInteger recipientIdentitySchemaVersion;
+@property (nonatomic, readonly, nullable) NSString *reactorE164;
+@property (nonatomic, readonly, nullable) NSString *reactorUUID;
 
 @end
 
 #pragma mark -
 
-@interface TSGroupModel (SDS)
+@interface OWSGroupCallMessage (SDS)
 
-@property (nonatomic, readonly) NSUInteger groupModelSchemaVersion;
-
-@end
-
-#pragma mark -
-
-@interface TSRecipientReadReceipt (SDS)
-
-@property (nonatomic, readonly) NSUInteger recipientReadReceiptSchemaVersion;
+@property (nonatomic, getter=wasRead) BOOL read;
+@property (nonatomic, readonly, nullable) NSString *eraId;
+@property (nonatomic, nullable) NSArray<NSString *> *joinedMemberUuids;
+@property (nonatomic, nullable) NSString *creatorUuid;
+@property (nonatomic, readonly) BOOL hasEnded;
 
 @end
-
-#pragma mark -
-
-@interface OWSUnknownProtocolVersionMessage (SDS)
-
-@property (nonatomic, readonly) NSUInteger unknownProtocolVersionMessageSchemaVersion;
-
-@end
-
-#pragma mark -
 
 NS_ASSUME_NONNULL_END

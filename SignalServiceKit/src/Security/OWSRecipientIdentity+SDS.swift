@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -12,6 +12,8 @@ import SignalCoreKit
 // MARK: - Record
 
 public struct RecipientIdentityRecord: SDSRecord {
+    public weak var delegate: SDSRecordDelegate?
+
     public var tableMetadata: SDSTableMetadata {
         return OWSRecipientIdentitySerializer.table
     }
@@ -25,12 +27,11 @@ public struct RecipientIdentityRecord: SDSRecord {
     public let recordType: SDSRecordType
     public let uniqueId: String
 
-    // Base class properties
+    // Properties
     public let accountId: String
     public let createdAt: Double
     public let identityKey: Data
     public let isFirstKnownKey: Bool
-    public let recipientIdentitySchemaVersion: UInt
     public let verificationState: OWSVerificationState
 
     public enum CodingKeys: String, CodingKey, ColumnExpression, CaseIterable {
@@ -41,12 +42,19 @@ public struct RecipientIdentityRecord: SDSRecord {
         case createdAt
         case identityKey
         case isFirstKnownKey
-        case recipientIdentitySchemaVersion
         case verificationState
     }
 
     public static func columnName(_ column: RecipientIdentityRecord.CodingKeys, fullyQualified: Bool = false) -> String {
         return fullyQualified ? "\(databaseTableName).\(column.rawValue)" : column.rawValue
+    }
+
+    public func didInsert(with rowID: Int64, for column: String?) {
+        guard let delegate = delegate else {
+            owsFailDebug("Missing delegate.")
+            return
+        }
+        delegate.updateRowId(rowID)
     }
 }
 
@@ -65,8 +73,7 @@ public extension RecipientIdentityRecord {
         createdAt = row[4]
         identityKey = row[5]
         isFirstKnownKey = row[6]
-        recipientIdentitySchemaVersion = row[7]
-        verificationState = row[8]
+        verificationState = row[7]
     }
 }
 
@@ -103,15 +110,14 @@ extension OWSRecipientIdentity {
             let createdAt: Date = SDSDeserialization.requiredDoubleAsDate(createdAtInterval, name: "createdAt")
             let identityKey: Data = record.identityKey
             let isFirstKnownKey: Bool = record.isFirstKnownKey
-            let recipientIdentitySchemaVersion: UInt = record.recipientIdentitySchemaVersion
             let verificationState: OWSVerificationState = record.verificationState
 
-            return OWSRecipientIdentity(uniqueId: uniqueId,
+            return OWSRecipientIdentity(grdbId: recordId,
+                                        uniqueId: uniqueId,
                                         accountId: accountId,
                                         createdAt: createdAt,
                                         identityKey: identityKey,
                                         isFirstKnownKey: isFirstKnownKey,
-                                        recipientIdentitySchemaVersion: recipientIdentitySchemaVersion,
                                         verificationState: verificationState)
 
         default:
@@ -147,22 +153,55 @@ extension OWSRecipientIdentity: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSRecipientIdentity: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSRecipientIdentity.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let accountId: String = modelToCopy.accountId
+            let createdAt: Date = modelToCopy.createdAt
+            let identityKey: Data = modelToCopy.identityKey
+            let isFirstKnownKey: Bool = modelToCopy.isFirstKnownKey
+            let verificationState: OWSVerificationState = modelToCopy.verificationState
+
+            return OWSRecipientIdentity(grdbId: id,
+                                        uniqueId: uniqueId,
+                                        accountId: accountId,
+                                        createdAt: createdAt,
+                                        identityKey: identityKey,
+                                        isFirstKnownKey: isFirstKnownKey,
+                                        verificationState: verificationState)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSRecipientIdentitySerializer {
 
     // This defines all of the columns used in the table
     // where this model (and any subclasses) are persisted.
-    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey, columnIndex: 0)
-    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64, columnIndex: 1)
-    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true, columnIndex: 2)
-    // Base class properties
-    static let accountIdColumn = SDSColumnMetadata(columnName: "accountId", columnType: .unicodeString, columnIndex: 3)
-    static let createdAtColumn = SDSColumnMetadata(columnName: "createdAt", columnType: .double, columnIndex: 4)
-    static let identityKeyColumn = SDSColumnMetadata(columnName: "identityKey", columnType: .blob, columnIndex: 5)
-    static let isFirstKnownKeyColumn = SDSColumnMetadata(columnName: "isFirstKnownKey", columnType: .int, columnIndex: 6)
-    static let recipientIdentitySchemaVersionColumn = SDSColumnMetadata(columnName: "recipientIdentitySchemaVersion", columnType: .int64, columnIndex: 7)
-    static let verificationStateColumn = SDSColumnMetadata(columnName: "verificationState", columnType: .int, columnIndex: 8)
+    static let idColumn = SDSColumnMetadata(columnName: "id", columnType: .primaryKey)
+    static let recordTypeColumn = SDSColumnMetadata(columnName: "recordType", columnType: .int64)
+    static let uniqueIdColumn = SDSColumnMetadata(columnName: "uniqueId", columnType: .unicodeString, isUnique: true)
+    // Properties
+    static let accountIdColumn = SDSColumnMetadata(columnName: "accountId", columnType: .unicodeString)
+    static let createdAtColumn = SDSColumnMetadata(columnName: "createdAt", columnType: .double)
+    static let identityKeyColumn = SDSColumnMetadata(columnName: "identityKey", columnType: .blob)
+    static let isFirstKnownKeyColumn = SDSColumnMetadata(columnName: "isFirstKnownKey", columnType: .int)
+    static let verificationStateColumn = SDSColumnMetadata(columnName: "verificationState", columnType: .int)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -176,7 +215,6 @@ extension OWSRecipientIdentitySerializer {
         createdAtColumn,
         identityKeyColumn,
         isFirstKnownKeyColumn,
-        recipientIdentitySchemaVersionColumn,
         verificationStateColumn
         ])
 }
@@ -189,14 +227,14 @@ public extension OWSRecipientIdentity {
         sdsSave(saveMode: .insert, transaction: transaction)
     }
 
-    // This method is private; we should never use it directly.
-    // Instead, use anyUpdate(transaction:block:), so that we
-    // use the "update with" pattern.
-    private func anyUpdate(transaction: SDSAnyWriteTransaction) {
-        sdsSave(saveMode: .update, transaction: transaction)
-    }
-
-    @available(*, deprecated, message: "Use anyInsert() or anyUpdate() instead.")
+    // Avoid this method whenever feasible.
+    //
+    // If the record has previously been saved, this method does an overwriting
+    // update of the corresponding row, otherwise if it's a new record, this
+    // method inserts a new row.
+    //
+    // For performance, when possible, you should explicitly specify whether
+    // you are inserting or updating rather than calling this method.
     func anyUpsert(transaction: SDSAnyWriteTransaction) {
         let isInserting: Bool
         if OWSRecipientIdentity.anyFetch(uniqueId: uniqueId, transaction: transaction) != nil {
@@ -247,7 +285,20 @@ public extension OWSRecipientIdentity {
             block(dbCopy)
         }
 
-        dbCopy.anyUpdate(transaction: transaction)
+        dbCopy.sdsSave(saveMode: .update, transaction: transaction)
+    }
+
+    // This method is an alternative to `anyUpdate(transaction:block:)` methods.
+    //
+    // We should generally use `anyUpdate` to ensure we're not unintentionally
+    // clobbering other columns in the database when another concurrent update
+    // has occured.
+    //
+    // There are cases when this doesn't make sense, e.g. when  we know we've
+    // just loaded the model in the same transaction. In those cases it is
+    // safe and faster to do a "overwriting" update
+    func anyOverwritingUpdate(transaction: SDSAnyWriteTransaction) {
+        sdsSave(saveMode: .update, transaction: transaction)
     }
 
     func anyRemove(transaction: SDSAnyWriteTransaction) {
@@ -274,9 +325,11 @@ public extension OWSRecipientIdentity {
 
 @objc
 public class OWSRecipientIdentityCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<RecipientIdentityRecord>?
 
-    init(cursor: RecordCursor<RecipientIdentityRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<RecipientIdentityRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -318,10 +371,10 @@ public extension OWSRecipientIdentity {
         let database = transaction.database
         do {
             let cursor = try RecipientIdentityRecord.fetchCursor(database)
-            return OWSRecipientIdentityCursor(cursor: cursor)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSRecipientIdentityCursor(cursor: nil)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -527,11 +580,11 @@ public extension OWSRecipientIdentity {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try RecipientIdentityRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSRecipientIdentityCursor(cursor: cursor)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: cursor)
         } catch {
             Logger.error("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSRecipientIdentityCursor(cursor: nil)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -568,19 +621,35 @@ class OWSRecipientIdentitySerializer: SDSSerializer {
     // MARK: - Record
 
     func asRecord() throws -> SDSRecord {
-        let id: Int64? = nil
+        let id: Int64? = model.grdbId?.int64Value
 
         let recordType: SDSRecordType = .recipientIdentity
         let uniqueId: String = model.uniqueId
 
-        // Base class properties
+        // Properties
         let accountId: String = model.accountId
         let createdAt: Double = archiveDate(model.createdAt)
         let identityKey: Data = model.identityKey
         let isFirstKnownKey: Bool = model.isFirstKnownKey
-        let recipientIdentitySchemaVersion: UInt = model.recipientIdentitySchemaVersion
         let verificationState: OWSVerificationState = model.verificationState
 
-        return RecipientIdentityRecord(id: id, recordType: recordType, uniqueId: uniqueId, accountId: accountId, createdAt: createdAt, identityKey: identityKey, isFirstKnownKey: isFirstKnownKey, recipientIdentitySchemaVersion: recipientIdentitySchemaVersion, verificationState: verificationState)
+        return RecipientIdentityRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, accountId: accountId, createdAt: createdAt, identityKey: identityKey, isFirstKnownKey: isFirstKnownKey, verificationState: verificationState)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSRecipientIdentity {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSRecipientIdentity {
+        guard let record = try asRecord() as? RecipientIdentityRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSRecipientIdentity.fromRecord(record)
+    }
+}
+#endif

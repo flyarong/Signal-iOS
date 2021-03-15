@@ -1,15 +1,15 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 #import "CountryCodeViewController.h"
 #import "OWSSearchBar.h"
 #import "PhoneNumberUtil.h"
 #import "Theme.h"
-#import "UIColor+OWS.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
 #import <SignalCoreKit/NSString+OWS.h>
+#import <SignalMessaging/SignalMessaging-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -30,9 +30,9 @@ NS_ASSUME_NONNULL_BEGIN
     [super loadView];
 
     self.shouldUseTheme = NO;
-    self.interfaceOrientationMask = UIInterfaceOrientationMaskAllButUpsideDown;
+    self.interfaceOrientationMask = UIDevice.currentDevice.defaultSupportedOrienations;
 
-    self.view.backgroundColor = [UIColor whiteColor];
+    self.useThemeBackgroundColors = YES;
     self.title = NSLocalizedString(@"COUNTRYCODE_SELECT_TITLE", @"");
 
     self.countryCodes = [PhoneNumberUtil countryCodesForSearchTerm:nil];
@@ -84,8 +84,8 @@ NS_ASSUME_NONNULL_BEGIN
 
                                  UILabel *countryCodeLabel = [UILabel new];
                                  countryCodeLabel.text = [PhoneNumberUtil callingCodeFromCountryCode:countryCode];
-                                 countryCodeLabel.font = [UIFont ows_regularFontWithSize:16.f];
-                                 countryCodeLabel.textColor = Theme.secondaryColor;
+                                 countryCodeLabel.font = OWSTableItem.accessoryLabelFont;
+                                 countryCodeLabel.textColor = Theme.secondaryTextAndIconColor;
                                  [countryCodeLabel sizeToFit];
                                  cell.accessoryView = countryCodeLabel;
 
